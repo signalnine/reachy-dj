@@ -1,0 +1,2 @@
+*.nbc filter=lfs diff=lfs merge=lfs -text
+*.nbi filter=lfs diff=lfs merge=lfs -text
