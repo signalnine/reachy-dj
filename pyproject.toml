@@ -1,0 +1,31 @@
+[project]
+name = "reachy_mini_dance_party_app"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = [
+  "reachy-mini>=1.7.1",
+  "reachy_mini_dances_library",
+  "openai>=2.30.0",
+  "yt-dlp>=2025.10.0",
+  "librosa>=0.11.0",
+  "sounddevice>=0.5.0",
+  "mediapipe==0.10.14",
+  "opencv-python>=4.13.0",
+  "numpy",
+  "av",
+  "httpx",
+  "python-dotenv",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "pytest-asyncio", "pytest-mock", "ruff"]
+
+[project.entry-points."reachy_mini_apps"]
+reachy_mini_dance_party_app = "reachy_mini_dance_party_app.main:ReachyMiniDancePartyApp"
+
+[project.scripts]
+reachy-mini-dance-party-app = "reachy_mini_dance_party_app.main:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
