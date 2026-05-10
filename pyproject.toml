@@ -29,3 +29,8 @@ reachy-mini-dance-party-app = "reachy_mini_dance_party_app.main:main"
 [build-system]
 requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
+
+[tool.pytest.ini_options]
+markers = [
+  "requires_robot: integration test that needs a live ReachyMini daemon at localhost:8000",
+]
