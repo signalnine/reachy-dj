@@ -42,7 +42,15 @@ include = ["reachy_mini_dance_party_app*"]
 # (and the daemon's app-store installer) silently drop them, and
 # ``load_system_prompt`` fails at startup with FileNotFoundError on
 # prompts/system.md.
-"reachy_mini_dance_party_app" = ["prompts/*.md", "prompts/*.txt"]
+"reachy_mini_dance_party_app" = [
+  "prompts/*.md",
+  "prompts/*.txt",
+  # Bundled numba JIT cache for librosa.beat (linux_aarch64 + cpython 3.12,
+  # the Reachy Mini wireless config). Lets the first song's beat_track skip
+  # the ~8-minute cold-compile on the Pi.
+  "_numba_cache_linux_aarch64_py312/librosa/**/*.nbi",
+  "_numba_cache_linux_aarch64_py312/librosa/**/*.nbc",
+]
 
 [tool.pytest.ini_options]
 markers = [

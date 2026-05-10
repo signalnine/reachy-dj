@@ -98,6 +98,65 @@ def _load_env_files() -> None:
         log.info("loaded environment from %s", resolved)
 
 
+def _restore_librosa_numba_cache() -> bool:
+    """Copy bundled numba cache files into librosa's site-packages tree.
+
+    Numba caches ``@njit(cache=True)`` results in
+    ``librosa/.../__pycache__/*.nbi`` and ``*.nbc``. We bundle pre-built
+    caches for ``linux_aarch64`` + ``cpython 3.12`` (the Reachy Mini
+    wireless config) so the very first run doesn't pay the ~8-minute
+    cold compile. Cache files contain an internal source hash; if librosa
+    has been upgraded since the cache was built, numba ignores the stale
+    file and recompiles — so falling back is safe.
+
+    Only runs on platforms where shipping the cache makes sense (Pi-class
+    aarch64 Linux on Python 3.12). x86_64 desktops JIT in seconds, no
+    need to bundle.
+
+    Returns True if any cache files were copied this call.
+    """
+    import platform as _plat
+    import shutil as _sh
+    import sys as _sys
+    machine = _plat.machine().lower()
+    system = _plat.system().lower()
+    pyver = f"py{_sys.version_info.major}{_sys.version_info.minor}"
+    if (machine, system, pyver) != ("aarch64", "linux", "py312"):
+        return False
+    bundled = Path(__file__).parent / "_numba_cache_linux_aarch64_py312"
+    if not bundled.exists():
+        return False
+    try:
+        import librosa
+        librosa_root = Path(librosa.__file__).parent
+    except Exception:  # noqa: BLE001
+        return False
+    copied = 0
+    skipped = 0
+    for src in bundled.rglob("*"):
+        if src.is_dir():
+            continue
+        # Map .../bundled/librosa/<subpath>/__pycache__/<file> →
+        # .../site-packages/librosa/<subpath>/__pycache__/<file>
+        rel = src.relative_to(bundled / "librosa")
+        dst = librosa_root / rel
+        if dst.exists():
+            skipped += 1
+            continue
+        try:
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            _sh.copy2(src, dst)
+            copied += 1
+        except Exception as exc:  # noqa: BLE001
+            log.debug("librosa cache copy failed for %s: %s", rel, exc)
+    if copied:
+        log.info(
+            "librosa numba cache restored from bundle (%d copied, %d already present)",
+            copied, skipped,
+        )
+    return copied > 0
+
+
 def _prewarm_librosa() -> None:
     """Run a tiny librosa.beat.beat_track to trigger numba JIT off the hot path."""
     try:
@@ -563,6 +622,10 @@ class ReachyMiniDancePartyApp:
         # ufuncs takes 60–300s on a Pi the first time it runs). Doing it on
         # a background thread before any user request avoids that delay being
         # incurred inside play_song while the realtime session looks frozen.
+        # Restore librosa numba cache (synchronous; cheap file copy) BEFORE
+        # spawning the prewarm thread. If the bundle was applicable, the
+        # prewarm will load from cache in ~1s instead of ~8 min.
+        _restore_librosa_numba_cache()
         threading.Thread(
             target=_prewarm_librosa, daemon=True, name="LibrosaPreWarm",
         ).start()
