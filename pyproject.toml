@@ -31,6 +31,16 @@ reachy-mini-dance-party-app = "reachy_mini_dance_party_app.main:main"
 requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
+[tool.setuptools.packages.find]
+include = ["reachy_mini_dance_party_app*"]
+
+[tool.setuptools.package-data]
+# Non-.py files we ship inside the package. Without this, ``pip install``
+# (and the daemon's app-store installer) silently drop them, and
+# ``load_system_prompt`` fails at startup with FileNotFoundError on
+# prompts/system.md.
+"reachy_mini_dance_party_app" = ["prompts/*.md", "prompts/*.txt"]
+
 [tool.pytest.ini_options]
 markers = [
   "requires_robot: integration test that needs a live ReachyMini daemon at localhost:8000",
