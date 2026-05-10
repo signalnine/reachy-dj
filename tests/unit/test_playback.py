@@ -5,6 +5,13 @@ construction arguments, exposes start/stop/close as no-ops that flip flags,
 and provides a `tick(n_frames)` test helper that synchronously invokes the
 callback once with an outdata buffer of the requested size. All callback
 invocations (their outdata snapshots) are recorded for inspection.
+
+After Task 15 the engine takes a ``Mixer`` and a ``Ducker`` and runs music
+through both even when no TTS is being mixed in. These tests exercise the
+music path only — TTS-specific behaviour lives in
+``test_playback_with_mixer.py`` — so the ducker is configured with
+``ramp_s=0.0, hangover_s=0.0`` and ``speech_active`` is never asserted, which
+keeps ``music_gain == 1.0`` and the output identical to the raw music buffer.
 """
 from __future__ import annotations
 
@@ -14,6 +21,7 @@ from typing import Any, Callable
 import numpy as np
 import pytest
 
+from reachy_mini_dance_party_app.music.mixer import Ducker, Mixer
 from reachy_mini_dance_party_app.music.playback import PlaybackEngine
 
 
@@ -90,12 +98,27 @@ def stereo_ramp_wav(tmp_path: Path) -> tuple[Path, np.ndarray, int]:
     return path, data, sr
 
 
+def _make_engine(sample_rate: int = 22050) -> PlaybackEngine:
+    """Build a PlaybackEngine with a no-op ducker so music passes through unchanged."""
+    mixer = Mixer()
+    # ramp_s=0 + hangover_s=0 keeps the ducker at gain=1.0 forever as long as
+    # speech_active stays False (the default). Music-only path == raw buffer.
+    ducker = Ducker(duck_to=0.25, ramp_s=0.0, hangover_s=0.0)
+    return PlaybackEngine(
+        mixer=mixer,
+        ducker=ducker,
+        sample_rate=sample_rate,
+        channels=1,
+        stream_factory=FakeOutputStream,
+    )
+
+
 # ---------- Tests ----------
 
 
 def test_load_then_playback_time_starts_at_zero(stereo_ramp_wav):
     path, _, sr = stereo_ramp_wav
-    engine = PlaybackEngine(stream_factory=FakeOutputStream)
+    engine = _make_engine(sample_rate=sr)
     engine.load(path)
 
     assert engine.playback_time() == pytest.approx(0.0)
@@ -105,7 +128,7 @@ def test_load_then_playback_time_starts_at_zero(stereo_ramp_wav):
 
 def test_callback_advances_playback_time(stereo_ramp_wav):
     path, _, sr = stereo_ramp_wav
-    engine = PlaybackEngine(stream_factory=FakeOutputStream)
+    engine = _make_engine(sample_rate=sr)
     engine.load(path)
     engine.start()
 
@@ -120,8 +143,8 @@ def test_callback_advances_playback_time(stereo_ramp_wav):
 
 
 def test_callback_consumes_buffer_in_order(stereo_ramp_wav):
-    path, data, _sr = stereo_ramp_wav
-    engine = PlaybackEngine(stream_factory=FakeOutputStream)
+    path, data, sr = stereo_ramp_wav
+    engine = _make_engine(sample_rate=sr)
     engine.load(path)
     engine.start()
 
@@ -135,8 +158,8 @@ def test_callback_consumes_buffer_in_order(stereo_ramp_wav):
 
 
 def test_callback_outputs_silence_after_buffer_exhausted(stereo_ramp_wav):
-    path, data, _sr = stereo_ramp_wav
-    engine = PlaybackEngine(stream_factory=FakeOutputStream)
+    path, data, sr = stereo_ramp_wav
+    engine = _make_engine(sample_rate=sr)
     engine.load(path)
     engine.start()
 
@@ -156,8 +179,8 @@ def test_callback_outputs_silence_after_buffer_exhausted(stereo_ramp_wav):
 
 
 def test_stop_closes_stream(stereo_ramp_wav):
-    path, _, _ = stereo_ramp_wav
-    engine = PlaybackEngine(stream_factory=FakeOutputStream)
+    path, _, sr = stereo_ramp_wav
+    engine = _make_engine(sample_rate=sr)
     engine.load(path)
     engine.start()
 
