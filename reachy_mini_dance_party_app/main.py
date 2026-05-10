@@ -136,10 +136,15 @@ def _restore_librosa_numba_cache() -> bool:
     for src in bundled.rglob("*"):
         if src.is_dir():
             continue
-        # Map .../bundled/librosa/<subpath>/__pycache__/<file> →
+        # Map .../bundled/librosa/<subpath>/_pycache/<file> →
         # .../site-packages/librosa/<subpath>/__pycache__/<file>
+        # (the bundle uses _pycache so .gitignore's __pycache__/ rule doesn't
+        # exclude it from the repo and shipped wheel)
         rel = src.relative_to(bundled / "librosa")
-        dst = librosa_root / rel
+        rel_translated = Path(*[
+            "__pycache__" if p == "_pycache" else p for p in rel.parts
+        ])
+        dst = librosa_root / rel_translated
         if dst.exists():
             skipped += 1
             continue
