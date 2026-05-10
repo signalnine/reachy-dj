@@ -290,8 +290,12 @@ class OpenAIRealtimeSession:
                 "modalities": ["audio", "text"],
                 "input_audio_format": "pcm16",
                 "output_audio_format": "pcm16",
-                "input_audio_sample_rate": self._sample_rate,
-                "output_audio_sample_rate": self._sample_rate,
+                # NOTE: pcm16 is implicitly 24kHz on the GA realtime API; the
+                # explicit ``input_audio_sample_rate`` / ``output_audio_sample_rate``
+                # fields the older beta accepted are now rejected as
+                # ``unknown_parameter`` (verified against gpt-realtime, 2026-05).
+                # ``self._sample_rate`` is still kept on the instance for the
+                # mixer / playback engine which need to know the rate.
                 "turn_detection": {
                     "type": "server_vad",
                     "interrupt_response": True,
