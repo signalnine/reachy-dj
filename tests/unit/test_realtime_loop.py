@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import threading
 from collections.abc import Awaitable, Callable
 from typing import Any
 from unittest.mock import MagicMock
@@ -288,3 +289,102 @@ async def test_reconnect_backoff_on_disconnect(
     assert sleeps[0] == pytest.approx(1.0)
     assert sleeps[1] == pytest.approx(2.0)
     assert sleeps[1] > sleeps[0]
+
+
+@pytest.mark.asyncio
+async def test_inject_system_event_from_background_thread_reaches_socket() -> None:
+    """``inject_system_event`` called from a *non-loop* thread must still send.
+
+    Regression: previously ``_send_nowait`` called ``asyncio.get_running_loop``
+    which raises ``RuntimeError`` in a worker thread (no running loop), so the
+    payload was silently dropped. The session now captures its loop at startup
+    so ``run_coroutine_threadsafe`` can target it from any thread.
+    """
+    # A queue we await on the main loop side, fed by the session once the
+    # session.update arrives — that's our signal that the connection is live.
+    ready = asyncio.Event()
+    main_loop = asyncio.get_running_loop()
+
+    class ReadyOnSendWS(FakeWebSocket):
+        async def send(self, payload: str | bytes) -> None:
+            await super().send(payload)
+            # First send is the session.update; mark connection live so the
+            # background thread knows it is safe to inject.
+            main_loop.call_soon_threadsafe(ready.set)
+
+    ws = ReadyOnSendWS()  # No incoming events; recv() will block until close.
+
+    session = OpenAIRealtimeSession(
+        api_key="DUMMY",
+        tools=_make_tools(),
+        system_prompt="DJ",
+        on_tts_chunk=lambda _b: None,
+        connect_callable=_make_connect_factory([ws]),
+        connection_closed_exceptions=(FakeConnectionClosed,),
+        max_reconnect_attempts=1,
+    )
+
+    run_task = asyncio.create_task(session.run())
+    try:
+        # Wait until the session has actually connected (session.update sent).
+        await asyncio.wait_for(ready.wait(), timeout=1.0)
+
+        # Fire the inject from a background thread that has *no* running loop.
+        thread_errors: list[BaseException] = []
+
+        def background_inject() -> None:
+            try:
+                # Sanity: this thread must NOT have a running loop.
+                try:
+                    asyncio.get_running_loop()
+                except RuntimeError:
+                    pass
+                else:  # pragma: no cover - defensive
+                    raise AssertionError("background thread unexpectedly has a running loop")
+                session.inject_system_event("hello from thread")
+            except BaseException as exc:  # noqa: BLE001
+                thread_errors.append(exc)
+
+        t = threading.Thread(target=background_inject)
+        t.start()
+        t.join(timeout=1.0)
+        assert not thread_errors, f"background thread raised: {thread_errors!r}"
+
+        # Wait for the injected frame to be visible in ws.sent. The session
+        # loop processes the run_coroutine_threadsafe call asynchronously.
+        async def _has_inject() -> bool:
+            for f in ws.sent:
+                if (
+                    f.get("type") == "conversation.item.create"
+                    and f.get("item", {}).get("role") == "system"
+                ):
+                    content = f["item"].get("content") or []
+                    if content and content[0].get("text") == "hello from thread":
+                        return True
+            return False
+
+        for _ in range(50):
+            if await _has_inject():
+                break
+            await asyncio.sleep(0.01)
+        else:  # pragma: no cover - assertion below provides clearer diagnostics
+            pass
+
+        injected = [
+            f for f in ws.sent
+            if f.get("type") == "conversation.item.create"
+            and f.get("item", {}).get("role") == "system"
+        ]
+        assert injected, "background-thread inject_system_event did not reach socket"
+        assert injected[0]["item"]["content"][0]["text"] == "hello from thread"
+    finally:
+        session.stop()
+        await ws.close()
+        try:
+            await asyncio.wait_for(run_task, timeout=1.0)
+        except (asyncio.TimeoutError, asyncio.CancelledError, BaseException):
+            run_task.cancel()
+            try:
+                await run_task
+            except (asyncio.CancelledError, BaseException):
+                pass

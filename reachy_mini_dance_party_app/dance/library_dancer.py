@@ -160,6 +160,11 @@ class LibraryDancer(threading.Thread):
         if self._stop_event.is_set():
             return
 
+        # Timing note: ``MovementManager.queue_move_named`` ignores
+        # ``scheduled_at`` (its queue is sequential, not scheduled). The actual
+        # beat alignment is achieved by the ``_sleep_until`` call above —
+        # we wake up just before the target beat and enqueue, so the move
+        # pops off the queue near the intended downbeat.
         self._enqueue_move(move.name, target_beat)
         self._recent.append(move.name)
         self._next_target = target_beat + move.duration_s

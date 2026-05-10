@@ -121,6 +121,12 @@ class OpenAIRealtimeSession:
         self._stop_requested = asyncio.Event()
         self._connection: Any = None
         self._connected = asyncio.Event()
+        # Reference to the loop ``run()`` is executing on. Captured at the top
+        # of :meth:`run` so background-thread callers of ``inject_*`` (DJ,
+        # AudiencePush, etc.) can target the session loop via
+        # ``run_coroutine_threadsafe`` without needing a running loop in
+        # their own thread.
+        self._loop: asyncio.AbstractEventLoop | None = None
 
     # ------------------------------------------------------------------
     # Public API
@@ -128,6 +134,10 @@ class OpenAIRealtimeSession:
 
     async def run(self) -> None:
         """Connect, configure, dispatch events. Reconnects until ``stop()``."""
+        # Capture the running loop so background-thread inject_* calls can
+        # target it via run_coroutine_threadsafe (they don't have a running
+        # loop of their own).
+        self._loop = asyncio.get_running_loop()
         attempt = 0
         while not self._stop_requested.is_set():
             attempt += 1
@@ -418,14 +428,21 @@ class OpenAIRealtimeSession:
         await conn.send(json.dumps(frame))
 
     def _send_nowait(self, frame: dict) -> None:
-        """Schedule a send without awaiting; used by inject_* methods."""
+        """Schedule a send without awaiting; used by inject_* methods.
+
+        Safe to call from any thread (DJ, AudiencePush, etc.) — uses the
+        loop captured at :meth:`run` start to schedule the coroutine, so the
+        caller does not need a running loop of its own.
+        """
         conn = self._connection
         if conn is None:
             return
-        try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            logger.warning("inject_* called outside event loop; dropping")
+        loop = self._loop
+        if loop is None or loop.is_closed():
+            logger.warning(
+                "inject_* called before session loop running; dropping %r",
+                frame.get("type"),
+            )
             return
         asyncio.run_coroutine_threadsafe(self._send(frame), loop)
 
@@ -447,6 +464,6 @@ class OpenAIRealtimeSession:
 #   path but the live model's actual consumption of them is unverified for
 #   ``gpt-realtime``. Task 16 should probe this with a 1-line test.
 # - ``inject_system_event`` / ``inject_image`` use ``run_coroutine_threadsafe``
-#   which assumes the session loop is the running loop in *some* thread.
-#   Audience push (Task 14) and DJ (Task 3) will both call these; verify
-#   they're called from a thread that can see the session's loop.
+#   targeting the loop captured at the top of :meth:`run`. Background threads
+#   (DJ, AudiencePush) do not need a running loop of their own — they post
+#   onto the session loop directly.
