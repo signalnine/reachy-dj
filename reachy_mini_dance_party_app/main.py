@@ -94,6 +94,333 @@ def _load_env_files() -> None:
         log.info("loaded environment from %s", resolved)
 
 
+def _prewarm_librosa() -> None:
+    """Run a tiny librosa.beat.beat_track to trigger numba JIT off the hot path."""
+    try:
+        import time
+        import numpy as np
+        import librosa  # noqa: PLC0415
+        t0 = time.monotonic()
+        # 1.5s of synthetic clicks at 120 BPM so beat_track has something real.
+        sr = 22050
+        sig = np.zeros(int(sr * 1.5), dtype=np.float32)
+        for i in range(0, sig.size, sr // 2):
+            sig[i : i + 200] = 0.8
+        librosa.beat.beat_track(y=sig, sr=sr, units="time")
+        log.info("librosa.beat pre-warm complete in %.1fs", time.monotonic() - t0)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("librosa pre-warm failed (will JIT lazily): %s", exc)
+
+
+def _start_song_progress_watcher(
+    dj: Any,
+    playback: Any,
+    inject: Any,
+    stop_event: threading.Event,
+) -> threading.Thread:
+    """Spawn a thread that nudges the model about song progress.
+
+    Polls ``dj.current`` and ``playback.playback_time()``. When the active
+    song is within ~20 s of its end, injects a one-shot system notice so
+    the DJ can plan the next track. When playback passes the song's
+    duration, injects a "song ended" notice and flips DJ state via
+    ``dj.song_ended()``. Without this, the model is guessing — it tends to
+    cut songs short when it hears a pause in the audio.
+    """
+    state = {"warned_id": None, "ended_id": None}
+
+    def _loop() -> None:
+        while not stop_event.is_set():
+            stop_event.wait(1.0)
+            song = getattr(dj, "current", None)
+            if song is None:
+                continue
+            duration = float(getattr(song, "duration_s", 0.0) or 0.0)
+            if duration <= 0.0:
+                continue
+            song_id = id(song)
+            try:
+                t = float(playback.playback_time())
+            except Exception:  # noqa: BLE001
+                continue
+            remaining = duration - t
+            if remaining <= 20.0 and state["warned_id"] != song_id:
+                try:
+                    inject(
+                        f"Track ending in ~{max(0, int(round(remaining)))}s. "
+                        "Pick the next song now (auto-DJ)."
+                    )
+                except Exception:  # noqa: BLE001
+                    pass
+                state["warned_id"] = song_id
+            if remaining <= 0.0 and state["ended_id"] != song_id:
+                state["ended_id"] = song_id
+                try:
+                    inject(
+                        f"Track \"{song.title}\" finished. If no next song "
+                        "is queued, ask the audience what they want to hear."
+                    )
+                except Exception:  # noqa: BLE001
+                    pass
+                try:
+                    dj.song_ended()
+                except Exception:  # noqa: BLE001
+                    pass
+
+    t = threading.Thread(target=_loop, daemon=True, name="SongProgress")
+    t.start()
+    log.info("SongProgress watcher started")
+    return t
+
+
+def _start_mic_capture(
+    robot: Any,
+    session: Any,
+    stop_event: threading.Event,
+) -> threading.Thread:
+    """Spawn a daemon thread that pumps SDK mic samples into the realtime session.
+
+    The SDK's GStreamer mic returns 16kHz stereo float32 chunks via
+    ``media_manager.get_audio_sample()`` (returns ``None`` while the appsink
+    is empty). We downmix to mono, resample 16kHz→24kHz (the Realtime API
+    minimum input rate), convert to PCM16 LE, and push via the session's
+    thread-safe ``push_mic_chunk`` shim.
+    """
+    import numpy as np
+    from scipy.signal import resample_poly
+
+    log_state = {"started": False, "first_chunk": False, "total_bytes": 0}
+
+    def _loop() -> None:
+        log.info("MicCapture thread entered _loop")
+        try:
+            robot.media_manager.start_recording()
+            log_state["started"] = True
+            log.info("mic capture started (16kHz stereo → 24kHz mono PCM16)")
+        except Exception as exc:  # noqa: BLE001
+            log.exception("mic start_recording failed: %s", exc)
+            return
+        while not stop_event.is_set():
+            try:
+                sample = robot.media_manager.get_audio_sample()
+            except Exception as exc:  # noqa: BLE001
+                log.warning("get_audio_sample raised: %s", exc)
+                stop_event.wait(0.05)
+                continue
+            if sample is None or sample.size == 0:
+                stop_event.wait(0.01)
+                continue
+            # Stereo (frames, 2) → mono (frames,)
+            if sample.ndim == 2 and sample.shape[1] >= 2:
+                mono = sample.mean(axis=1)
+            else:
+                mono = sample.reshape(-1)
+            # 16kHz → 24kHz polyphase resample (3:2 ratio).
+            mono = resample_poly(mono, up=3, down=2).astype(np.float32, copy=False)
+            mono = np.clip(mono, -1.0, 1.0)
+            pcm16 = (mono * 32767.0).astype("<i2").tobytes()
+            try:
+                session.push_mic_chunk(pcm16)
+            except Exception as exc:  # noqa: BLE001
+                log.warning("push_mic_chunk failed: %s", exc)
+                continue
+            log_state["total_bytes"] += len(pcm16)
+            if not log_state["first_chunk"]:
+                log.info(
+                    "first mic chunk pushed to realtime (%d bytes)", len(pcm16)
+                )
+                log_state["first_chunk"] = True
+
+    log.info("spawning MicCapture thread")
+    t = threading.Thread(target=_loop, daemon=True, name="MicCapture")
+    t.start()
+    return t
+
+
+class _MediaManagerStream:
+    """Drives a PlaybackEngine-style callback, routing output to the SDK sink.
+
+    Replaces ``sounddevice.OutputStream`` in environments where the daemon
+    owns the speaker (Pi). The callback is invoked in a dedicated thread at
+    a fixed cadence; its mono output is broadcast to the sink's channel
+    count, resampled if the sink runs at a different rate, and pushed via
+    ``media_manager.push_audio_sample``. PlaybackEngine's ``_frames_played``
+    counter advances in step so ``playback_time()`` stays accurate for the
+    dance scheduler.
+    """
+
+    _BLOCK_FRAMES = 2048  # ~128ms @ 16kHz — gives the GStreamer queue headroom
+
+    def __init__(
+        self,
+        media_manager: Any,
+        sink_sr: int,
+        sink_channels: int,
+        engine_sr: int,
+        engine_channels: int,
+        callback: Any,
+    ) -> None:
+        import numpy as np
+        self._np = np
+        self._mm = media_manager
+        self._sink_sr = int(sink_sr)
+        self._sink_channels = int(sink_channels)
+        self._engine_sr = int(engine_sr)
+        self._engine_channels = int(engine_channels)
+        self._callback = callback
+        self._thread: Optional[threading.Thread] = None
+        self._stop_event = threading.Event()
+
+    def start(self) -> None:
+        if self._thread is not None:
+            return
+        self._stop_event.clear()
+        self._thread = threading.Thread(
+            target=self._run, daemon=True, name="MusicStreamer"
+        )
+        self._thread.start()
+        log.info(
+            "MusicStreamer started: engine=%dHz/%dch sink=%dHz/%dch block=%d",
+            self._engine_sr, self._engine_channels,
+            self._sink_sr, self._sink_channels, self._BLOCK_FRAMES,
+        )
+
+    def stop(self) -> None:
+        self._stop_event.set()
+
+    def close(self) -> None:
+        self.stop()
+        t = self._thread
+        if t is not None and t.is_alive():
+            t.join(timeout=1.0)
+        self._thread = None
+
+    def _run(self) -> None:
+        np = self._np
+        block = self._BLOCK_FRAMES
+        period = block / float(self._engine_sr)
+        outdata = np.zeros((block, self._engine_channels), dtype=np.float32)
+        next_deadline = None
+        first_logged = False
+        while not self._stop_event.is_set():
+            outdata.fill(0.0)
+            try:
+                self._callback(outdata, block, None, None)
+            except Exception as exc:  # noqa: BLE001
+                log.exception("MusicStreamer callback raised: %s", exc)
+                self._stop_event.wait(period)
+                continue
+            mono = outdata[:, 0] if self._engine_channels >= 1 else outdata.mean(axis=1)
+            if self._sink_sr != self._engine_sr:
+                from scipy.signal import resample_poly
+                # 48k → 16k = 1:3, 44.1k → 16k = 160:441 etc.
+                # Keep it general via gcd reduction so resample_poly is happy.
+                from math import gcd
+                g = gcd(self._sink_sr, self._engine_sr)
+                up = self._sink_sr // g
+                down = self._engine_sr // g
+                mono = resample_poly(mono, up=up, down=down).astype(np.float32, copy=False)
+            if self._sink_channels > 1:
+                sink_block = np.tile(mono[:, None], (1, self._sink_channels))
+            else:
+                sink_block = mono
+            try:
+                self._mm.push_audio_sample(sink_block)
+            except Exception as exc:  # noqa: BLE001
+                log.warning("MusicStreamer push_audio_sample failed: %s", exc)
+            if not first_logged and float(np.abs(mono).max()) > 1e-4:
+                log.info("MusicStreamer first non-silent block pushed")
+                first_logged = True
+            # Pace ourselves so we don't outrun the sink's queue.
+            import time as _time
+            now = _time.monotonic()
+            if next_deadline is None:
+                next_deadline = now + period
+            else:
+                next_deadline += period
+            sleep_for = next_deadline - now
+            if sleep_for > 0:
+                self._stop_event.wait(sleep_for)
+            else:
+                # Clock fell behind; reset to avoid a runaway burst.
+                next_deadline = now + period
+
+
+def _make_media_stream_factory(
+    robot: Any,
+    engine_sr: int,
+    engine_channels: int,
+) -> Any:
+    """Build a stream_factory for PlaybackEngine that routes to the SDK sink."""
+    sink_sr = robot.media_manager.get_output_audio_samplerate()
+    sink_channels = robot.media_manager.get_output_channels()
+
+    def factory(**kwargs: Any) -> _MediaManagerStream:
+        # PlaybackEngine passes samplerate/channels matching its own config —
+        # we honor those for the callback shape and fan out to the sink rate.
+        engine_sr_kw = int(kwargs.get("samplerate", engine_sr))
+        engine_ch_kw = int(kwargs.get("channels", engine_channels))
+        callback = kwargs["callback"]
+        return _MediaManagerStream(
+            media_manager=robot.media_manager,
+            sink_sr=sink_sr,
+            sink_channels=sink_channels,
+            engine_sr=engine_sr_kw,
+            engine_channels=engine_ch_kw,
+            callback=callback,
+        )
+
+    return factory
+
+
+def _make_sdk_tts_push(
+    robot: Any,
+    src_sr: int,
+    dst_sr: int,
+    channels: int,
+) -> Any:
+    """Build a callback that pushes OpenAI Realtime PCM16 chunks into the
+    SDK's audio sink.
+
+    The Realtime API delivers little-endian PCM16 mono at ``src_sr`` (24kHz on
+    GA gpt-realtime). The SDK's ``media_manager.push_audio_sample`` expects
+    float32 ndarray at ``dst_sr`` with ``channels`` channels. We resample only
+    if the rates differ; we duplicate to N channels by simple broadcast.
+    """
+    import numpy as np
+
+    first_logged = {"done": False}
+
+    def push(pcm_bytes: bytes) -> None:
+        if not pcm_bytes:
+            return
+        audio_i16 = np.frombuffer(pcm_bytes, dtype="<i2")
+        if audio_i16.size == 0:
+            return
+        audio_f32 = (audio_i16.astype(np.float32) / 32768.0)
+        if src_sr != dst_sr:
+            import librosa  # heavy import; deferred
+            audio_f32 = librosa.resample(
+                y=audio_f32, orig_sr=src_sr, target_sr=dst_sr
+            ).astype(np.float32, copy=False)
+        if channels > 1:
+            # Mono → N-channel broadcast (shape (frames, channels)).
+            audio_f32 = np.tile(audio_f32[:, None], (1, channels))
+        try:
+            robot.media_manager.push_audio_sample(audio_f32)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("push_audio_sample failed: %s", exc)
+            return
+        if not first_logged["done"]:
+            log.info(
+                "first TTS chunk pushed to SDK sink (%d frames @ %d Hz, %d ch)",
+                len(audio_i16), dst_sr, channels,
+            )
+            first_logged["done"] = True
+
+    return push
+
+
 def load_system_prompt() -> str:
     """Load the DJ persona system prompt shipped with the package."""
     try:
@@ -183,6 +510,14 @@ class ReachyMiniDancePartyApp:
                 "or export it before launching the app."
             )
 
+        # Pre-warm librosa.beat (numba JIT compile of the onset_strength
+        # ufuncs takes 60–300s on a Pi the first time it runs). Doing it on
+        # a background thread before any user request avoids that delay being
+        # incurred inside play_song while the realtime session looks frozen.
+        threading.Thread(
+            target=_prewarm_librosa, daemon=True, name="LibrosaPreWarm",
+        ).start()
+
         try:
             self._assemble(api_key)
             self._install_signal_handlers()
@@ -197,6 +532,18 @@ class ReachyMiniDancePartyApp:
     # ------------------------------------------------------------------
 
     def _assemble(self, api_key: str) -> None:
+        # Re-acquire media on the daemon side BEFORE constructing ReachyMini.
+        # If a prior session called /api/media/release, the daemon's status
+        # is "available=false, released=true" and ``ReachyMini()`` will pick
+        # the WebRTC backend, which then fails to connect to a non-existent
+        # signaling server. /api/media/acquire flips it back to LOCAL so the
+        # SDK uses the in-process GStreamer IPC path.
+        try:
+            httpx.post("http://localhost:8000/api/media/acquire", timeout=5.0)
+            log.info("media acquired on daemon (LOCAL backend)")
+        except Exception as exc:  # noqa: BLE001
+            log.warning("could not acquire media on daemon: %s", exc)
+
         # 1. SDK client - shared across move worker + camera worker.
         robot = ReachyMini()
 
@@ -204,6 +551,29 @@ class ReachyMiniDancePartyApp:
         move_manager = MovementManager(current_robot=robot)
         move_manager.start()
         self._stack.callback(move_manager.stop)
+
+        # Energize motors so the head holds upright at idle (BreathingMove
+        # in moves.py needs torque to actually visibly breathe; with motors
+        # disabled the robot just sags). The /api/motors/set_mode endpoint
+        # routes through the daemon's same control loop the SDK is using.
+        try:
+            httpx.post("http://localhost:8000/api/motors/set_mode/enabled", timeout=5.0)
+            log.info("motors enabled")
+        except Exception as exc:  # noqa: BLE001 - non-fatal at startup
+            log.warning("could not enable motors: %s", exc)
+
+        # Re-acquire media on the daemon side. If a prior session had called
+        # /api/media/release, the daemon flips the SDK's MediaBackend to
+        # WebRTC mode for new clients, and our ReachyMini() construction
+        # below tries to connect to a WebRTC signaling server that isn't
+        # there (ConnectionRefused). For LOCAL operation — which is what we
+        # want, since we're co-hosted with the daemon and want the GStreamer
+        # IPC path — the daemon needs to be holding the hardware.
+        try:
+            httpx.post("http://localhost:8000/api/media/acquire", timeout=5.0)
+            log.info("media acquired on daemon (LOCAL backend)")
+        except Exception as exc:  # noqa: BLE001
+            log.warning("could not acquire media on daemon: %s", exc)
 
         # 3. Camera worker (no SDK head tracker; we use FaceTracker instead).
         camera = CameraWorker(reachy_mini=robot, head_tracker=None)
@@ -218,15 +588,43 @@ class ReachyMiniDancePartyApp:
         # worker (overrides the default camera_worker face-offset source).
         move_manager.set_face_offset_provider(_face_offset_provider(face_tracker))
 
-        # 5. Audio: mixer, ducker, playback engine.
+        # 5. Audio: mixer + ducker still constructed (pure logic, used by
+        # PlaybackEngine for music ducking later), but TTS goes through the
+        # SDK's media_manager.push_audio_sample() which shares the daemon's
+        # GStreamer audio sink. PortAudio's exclusive ALSA grab fights the
+        # daemon for /dev/snd/pcmC0D0p; the SDK path is the supported one.
         mixer = Mixer()
         ducker = Ducker()
-        playback = PlaybackEngine(mixer=mixer, ducker=ducker)
-        # PlaybackEngine.start() is idempotent and is also called by the
-        # play_song tool when a song is loaded; we don't pre-start it here
-        # because that would open the audio device with an empty buffer.
-        # The stop() is still registered so any started stream gets closed.
-        self._stack.callback(playback.stop)
+        # PlaybackEngine drives a stream_factory that we redirect to the SDK
+        # sink. play_song.handler calls playback.load() and playback.start();
+        # start() opens the (fake) stream and the streamer thread begins
+        # pulling chunks via the engine's callback and pushing them to the
+        # daemon's GStreamer audio output.
+        # Match the SDK sink rate so the streamer doesn't have to resample
+        # each block (boundary ringing causes audible glitches). The wav is
+        # resampled once in PlaybackEngine.load instead.
+        engine_sr = robot.media_manager.get_output_audio_samplerate()
+        engine_channels = 1
+        media_stream_factory = _make_media_stream_factory(
+            robot, engine_sr=engine_sr, engine_channels=engine_channels
+        )
+        playback = PlaybackEngine(
+            mixer=mixer,
+            ducker=ducker,
+            sample_rate=engine_sr,
+            channels=engine_channels,
+            stream_factory=media_stream_factory,
+        )
+
+        # Open the SDK's audio output and prepare a TTS push callback that
+        # converts the OpenAI PCM16/24k chunks into float32 at the daemon's
+        # native sample rate before pushing.
+        robot.media_manager.start_playing()
+        self._stack.callback(robot.media_manager.stop_playing)
+        sdk_sr = robot.media_manager.get_output_audio_samplerate()
+        sdk_ch = robot.media_manager.get_output_channels()
+        log.info("SDK audio sink ready: sr=%d channels=%d", sdk_sr, sdk_ch)
+        tts_push = _make_sdk_tts_push(robot, src_sr=24000, dst_sr=sdk_sr, channels=sdk_ch)
 
         # 6. LibraryDancer (idle until a song's BeatGrid is set).
         dance_catalog = _build_dance_catalog()
@@ -266,7 +664,7 @@ class ReachyMiniDancePartyApp:
             api_key=api_key,
             tools=tools,
             system_prompt=load_system_prompt(),
-            on_tts_chunk=playback.feed_tts_chunk,
+            on_tts_chunk=tts_push,
             on_speech_state=playback.set_speech_active,
         )
         self._session = session  # exposed for tests
@@ -286,6 +684,29 @@ class ReachyMiniDancePartyApp:
         # stop() is sync but schedules the websocket close on the session
         # loop; the daemon thread exits when run() returns.
         self._stack.callback(session.stop)
+
+        # 9b. Mic capture worker — pumps SDK mic into the realtime session.
+        # Without this, server VAD never sees user audio so no responses fire.
+        mic_stop = threading.Event()
+        _start_mic_capture(robot, session, mic_stop)
+        def _stop_mic() -> None:
+            mic_stop.set()
+            try:
+                robot.media_manager.stop_recording()
+            except Exception:  # noqa: BLE001
+                pass
+        self._stack.callback(_stop_mic)
+
+        # 9c. Song-progress watcher — tells the DJ when the current song is
+        # almost over / has ended, so it doesn't cut songs short by guessing.
+        progress_stop = threading.Event()
+        _start_song_progress_watcher(
+            dj=dj,
+            playback=playback,
+            inject=session.inject_system_event,
+            stop_event=progress_stop,
+        )
+        self._stack.callback(progress_stop.set)
 
         # 10. Audience push timer. Sends summary JSON via the session's
         # system-event injection.

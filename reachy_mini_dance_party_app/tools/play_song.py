@@ -2,8 +2,13 @@
 
 from __future__ import annotations
 
+import logging
+
 from reachy_mini_dance_party_app.dj import SongInfo
 from reachy_mini_dance_party_app.tools.registry import AppContext, Tool, ToolError
+
+
+_log = logging.getLogger(__name__)
 
 
 SCHEMA = {
@@ -29,12 +34,22 @@ def make(ctx: AppContext) -> Tool:
             raise ToolError("query must be a non-empty string")
 
         ctx.dj.request_song(query)
+        _log.info("play_song: fetching %r", query)
         try:
             result = ctx.fetcher.fetch(query)
+            _log.info(
+                "play_song: fetched %r (%.1fs) → %s",
+                result.title, result.duration_s, result.path,
+            )
             grid = ctx.analyzer(result.path)
+            _log.info(
+                "play_song: analyzed beats (tempo=%.1f BPM, %d beats)",
+                grid.tempo, len(grid.beat_times),
+            )
             ctx.playback.load(result.path)
             ctx.playback.start()
             ctx.dancer.start_with_grid(grid)
+            _log.info("play_song: playback started for %r", result.title)
         except Exception as exc:  # noqa: BLE001
             ctx.dj.fetch_failed(str(exc))
             raise ToolError(f"failed to play {query!r}: {exc}") from exc

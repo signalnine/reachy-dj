@@ -18,10 +18,50 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
+import shutil
 from dataclasses import dataclass
 from pathlib import Path
 
 import yt_dlp
+
+
+_log = logging.getLogger(__name__)
+
+# yt-dlp's ytsearch1 happily returns hour-long compilations / livestreams
+# when a query is generic (e.g. "classic funk" → "Classic Funk Mix 3 Hours").
+# librosa.beat_track on a 500MB wav grinds the Pi for many minutes and
+# blocks subsequent tool calls, so we hard-cap at 8 minutes.
+_MAX_SONG_DURATION_S = 8 * 60
+
+
+def _duration_filter(info: dict) -> str | None:
+    """yt-dlp ``match_filter`` callback: skip overly long videos."""
+    duration = info.get("duration") or 0
+    if duration and duration > _MAX_SONG_DURATION_S:
+        title = info.get("title", "?")
+        return (
+            f"skipping {title!r}: duration {duration}s exceeds cap "
+            f"{_MAX_SONG_DURATION_S}s (likely a compilation/mix)"
+        )
+    return None
+
+
+def _find_ffmpeg() -> str | None:
+    """Locate ffmpeg, falling back to common paths if PATH is restricted.
+
+    The reachy-mini daemon launches apps with a minimal environment that
+    sometimes omits /usr/bin from PATH, so ``shutil.which`` returns ``None``
+    even though ffmpeg is installed. Checking absolute paths ourselves lets
+    yt-dlp postprocess audio when launched under the daemon.
+    """
+    found = shutil.which("ffmpeg")
+    if found:
+        return found
+    for candidate in ("/usr/bin/ffmpeg", "/usr/local/bin/ffmpeg"):
+        if Path(candidate).exists():
+            return candidate
+    return None
 
 
 class FetchError(Exception):
@@ -44,11 +84,23 @@ def _query_hash(query: str) -> str:
 
 
 class YouTubeFetcher:
-    """Blocking yt-dlp wrapper that caches audio + metadata by query hash."""
+    """Blocking yt-dlp wrapper that caches audio + metadata by query hash.
 
-    def __init__(self, cache_dir: Path = Path("/tmp/reachy_dance_party")) -> None:
+    The cache is bounded by ``max_cached_songs``: at every fetch (cache miss
+    or hit) the oldest .wav files beyond that count are deleted along with
+    their sidecar .info.json / .beats.npy / .tempo.txt files. /tmp is tmpfs
+    on the Pi (RAM-backed, ~2 GiB total) so unbounded growth would crowd
+    out other processes.
+    """
+
+    def __init__(
+        self,
+        cache_dir: Path = Path("/tmp/reachy_dance_party"),
+        max_cached_songs: int = 12,
+    ) -> None:
         self.cache_dir = Path(cache_dir)
         self.cache_dir.mkdir(parents=True, exist_ok=True)
+        self.max_cached_songs = int(max_cached_songs)
 
     # ----- public --------------------------------------------------------
 
@@ -66,6 +118,14 @@ class YouTubeFetcher:
         # Ensure cache_dir exists even if it was deleted between __init__ and now.
         self.cache_dir.mkdir(parents=True, exist_ok=True)
 
+        # Best-effort eviction so old downloads don't fill /tmp (tmpfs).
+        try:
+            self._evict_old_entries()
+        except Exception as exc:  # noqa: BLE001
+            # Cache cleanup must never block a fetch.
+            import logging
+            logging.getLogger(__name__).warning("cache eviction skipped: %s", exc)
+
         h = _query_hash(query)
         wav_path = self.cache_dir / f"{h}.wav"
         info_path = self.cache_dir / f"{h}.info.json"
@@ -81,29 +141,41 @@ class YouTubeFetcher:
             ],
             "quiet": True,
             "no_warnings": True,
+            "match_filter": _duration_filter,
+            # ytsearch5: try the top 5 hits and let match_filter discard the
+            # long ones, so a generic query that happens to match a 3-hour
+            # mix as the first result still finds a real song.
+            "playlistend": 5,
         }
+        ffmpeg_path = _find_ffmpeg()
+        if ffmpeg_path:
+            # Daemon-launched apps may not have /usr/bin on PATH, so point
+            # yt-dlp at ffmpeg directly. yt-dlp accepts a directory or a
+            # binary path; the parent dir is what it actually uses.
+            opts["ffmpeg_location"] = str(Path(ffmpeg_path).parent)
 
+        _log.info("yt-dlp fetching query=%r", query)
         try:
             with yt_dlp.YoutubeDL(opts) as ydl:
-                raw = ydl.extract_info(f"ytsearch1:{query}", download=True)
+                raw = ydl.extract_info(f"ytsearch5:{query}", download=True)
         except yt_dlp.utils.DownloadError as e:
             raise FetchError(str(e)) from e
         except Exception as e:  # noqa: BLE001 — yt-dlp wraps many failure modes
             raise FetchError(str(e)) from e
+        _log.info("yt-dlp fetch returned for query=%r", query)
 
-        info = self._unwrap_search_result(raw)
-        if info is None:
-            raise FetchError(f"no results for query: {query!r}")
-
-        video_id = info.get("id")
-        if not video_id:
-            raise FetchError("yt-dlp returned info without an 'id' field")
-
-        produced_wav = self.cache_dir / f"{video_id}.wav"
-        if not produced_wav.exists():
+        # Walk the search result entries (after match_filter pruning) and
+        # take the first one whose .wav was actually produced on disk.
+        info, produced_wav = self._first_downloaded(raw)
+        if info is None or produced_wav is None:
             raise FetchError(
-                f"expected wav at {produced_wav} after FFmpegExtractAudio, not found"
+                f"no usable results for query: {query!r} "
+                f"(all matches filtered out — too long, age-gated, or unavailable)"
             )
+        _log.info(
+            "yt-dlp picked %r (id=%s, %.1fs)",
+            info.get("title", "?"), info.get("id"), float(info.get("duration") or 0.0),
+        )
 
         # Rename to hash-keyed filename so future cache lookups by query work.
         if produced_wav != wav_path:
@@ -134,6 +206,39 @@ class YouTubeFetcher:
 
     # ----- internals -----------------------------------------------------
 
+    def _evict_old_entries(self) -> None:
+        """Drop oldest .wav files (and sidecars) beyond ``max_cached_songs``.
+
+        Also sweeps stray intermediate files yt-dlp may leave behind (.webm,
+        .m4a, .part, etc.) that aren't named like our hash-based cache keys.
+        """
+        wavs = sorted(
+            self.cache_dir.glob("*.wav"),
+            key=lambda p: p.stat().st_mtime,
+        )
+        excess = max(0, len(wavs) - self.max_cached_songs)
+        for wav in wavs[:excess]:
+            stem = wav.stem
+            for ext in (".wav", ".info.json", ".beats.npy", ".tempo.txt"):
+                sidecar = self.cache_dir / f"{stem}{ext}"
+                sidecar.unlink(missing_ok=True)
+
+        # Sweep yt-dlp intermediate / partial files. Our cache keys are
+        # 16-char lowercase hex; anything not matching is fair game.
+        for entry in self.cache_dir.iterdir():
+            if not entry.is_file():
+                continue
+            stem = entry.stem
+            ext = entry.suffix
+            looks_like_cache_key = (
+                len(stem) == 16 and all(c in "0123456789abcdef" for c in stem)
+            )
+            if looks_like_cache_key and ext in (
+                ".wav", ".info.json", ".beats.npy", ".tempo.txt"
+            ):
+                continue
+            entry.unlink(missing_ok=True)
+
     @staticmethod
     def _load_cached(wav_path: Path, info_path: Path) -> FetchResult:
         data = json.loads(info_path.read_text())
@@ -154,3 +259,29 @@ class YouTubeFetcher:
             entries = raw.get("entries") or []
             return entries[0] if entries else None
         return raw
+
+    def _first_downloaded(
+        self, raw: dict | None
+    ) -> tuple[dict | None, Path | None]:
+        """Return the first search-result entry whose <id>.wav exists on disk.
+
+        ``ytsearch5`` paired with our duration ``match_filter`` may produce
+        a list of entries where some have been skipped (no postprocess ran)
+        and one was actually downloaded. We pick the first one that resulted
+        in a wav file we can use.
+        """
+        if not raw:
+            return None, None
+        entries = raw.get("entries") if "entries" in raw else [raw]
+        if not entries:
+            return None, None
+        for info in entries:
+            if not isinstance(info, dict):
+                continue
+            video_id = info.get("id")
+            if not video_id:
+                continue
+            wav = self.cache_dir / f"{video_id}.wav"
+            if wav.exists():
+                return info, wav
+        return None, None

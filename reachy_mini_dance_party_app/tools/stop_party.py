@@ -15,7 +15,10 @@ SCHEMA = {
 def make(ctx: AppContext) -> Tool:
     def handler(args: dict) -> dict:
         ctx.playback.stop()
-        ctx.dancer.stop()
+        # clear_grid pauses the dancer without killing its thread — calling
+        # ctx.dancer.stop() here would tear down the worker permanently and
+        # any future play_song would have no beat scheduling.
+        ctx.dancer.clear_grid()
         ctx.dj.stop_party()
         return {"ok": True}
 

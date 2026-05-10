@@ -1,0 +1,238 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Reachy Mini Dance Party</title>
+<style>
+  :root {
+    --bg-1: #1a0033;
+    --bg-2: #4a0e7a;
+    --accent: #ff3aa6;
+    --accent-2: #00e8ff;
+    --text: #fff7ff;
+    --muted: #c2a8e8;
+    --card: rgba(255, 255, 255, 0.08);
+    --card-border: rgba(255, 255, 255, 0.18);
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0;
+    padding: 0;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    background: linear-gradient(135deg, var(--bg-1), var(--bg-2));
+    color: var(--text);
+    min-height: 100vh;
+    overflow-x: hidden;
+  }
+  .stage {
+    max-width: 980px;
+    margin: 0 auto;
+    padding: 3rem 1.25rem 4rem;
+  }
+  header {
+    text-align: center;
+    margin-bottom: 2.5rem;
+  }
+  h1 {
+    font-size: clamp(2.2rem, 6vw, 3.6rem);
+    margin: 0 0 0.4rem;
+    background: linear-gradient(90deg, var(--accent), var(--accent-2));
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+    letter-spacing: -0.02em;
+  }
+  header p {
+    margin: 0;
+    color: var(--muted);
+    font-size: 1.1rem;
+  }
+  .disco {
+    display: inline-block;
+    font-size: 3rem;
+    animation: spin 6s linear infinite;
+    margin-bottom: 0.4rem;
+  }
+  @keyframes spin {
+    from { transform: rotate(0deg); }
+    to   { transform: rotate(360deg); }
+  }
+  section {
+    background: var(--card);
+    border: 1px solid var(--card-border);
+    border-radius: 14px;
+    padding: 1.5rem 1.5rem;
+    margin-bottom: 1.25rem;
+    backdrop-filter: blur(8px);
+  }
+  section h2 {
+    margin: 0 0 1rem;
+    font-size: 1.3rem;
+    color: var(--accent);
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+  }
+  .commands {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+    gap: 0.75rem;
+  }
+  .cmd {
+    background: rgba(0, 0, 0, 0.25);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    border-radius: 10px;
+    padding: 0.85rem 1rem;
+    transition: transform 0.15s ease, border-color 0.15s ease;
+  }
+  .cmd:hover {
+    transform: translateY(-2px);
+    border-color: var(--accent);
+  }
+  .cmd .phrase {
+    font-weight: 600;
+    color: var(--text);
+    font-size: 0.95rem;
+  }
+  .cmd .desc {
+    color: var(--muted);
+    font-size: 0.82rem;
+    margin-top: 0.25rem;
+  }
+  .tools {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+    gap: 0.5rem 1rem;
+  }
+  .tools .tool {
+    font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    font-size: 0.85rem;
+    padding: 0.45rem 0;
+    color: var(--muted);
+    border-bottom: 1px dashed rgba(255, 255, 255, 0.08);
+  }
+  .tools .tool code {
+    color: var(--accent-2);
+    background: rgba(0, 232, 255, 0.08);
+    padding: 1px 6px;
+    border-radius: 4px;
+    margin-right: 0.5rem;
+  }
+  pre {
+    background: rgba(0, 0, 0, 0.4);
+    padding: 0.9rem 1rem;
+    border-radius: 8px;
+    overflow-x: auto;
+    font-size: 0.85rem;
+    line-height: 1.5;
+    color: var(--text);
+  }
+  code { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; }
+  a { color: var(--accent-2); }
+  a:hover { color: var(--accent); }
+  footer {
+    text-align: center;
+    color: var(--muted);
+    margin-top: 2rem;
+    font-size: 0.85rem;
+  }
+  .pulse {
+    display: inline-block;
+    width: 8px; height: 8px;
+    border-radius: 50%;
+    background: var(--accent);
+    margin-right: 0.4rem;
+    animation: pulse 1.2s ease-in-out infinite;
+  }
+  @keyframes pulse {
+    0%, 100% { opacity: 1; transform: scale(1); }
+    50%      { opacity: 0.4; transform: scale(1.3); }
+  }
+</style>
+</head>
+<body>
+<div class="stage">
+  <header>
+    <div class="disco">🪩</div>
+    <h1>Reachy Mini Dance Party</h1>
+    <p>Voice-controlled YouTube DJ + beat-aligned dancing for your Reachy Mini.</p>
+  </header>
+
+  <section>
+    <h2>How it works</h2>
+    <p>Install this app on your Reachy Mini and just <strong>talk to it</strong>. Ask for a song, and it grabs the audio from YouTube, beat-tracks it with librosa, and choreographs head moves from the official dance library to land on every beat. Auto-DJ keeps the party going between tracks.</p>
+  </section>
+
+  <section>
+    <h2><span class="pulse"></span>Try saying...</h2>
+    <div class="commands">
+      <div class="cmd">
+        <div class="phrase">"Play some Daft Punk"</div>
+        <div class="desc">Fetches and starts a track + synced dance.</div>
+      </div>
+      <div class="cmd">
+        <div class="phrase">"Play something funkier"</div>
+        <div class="desc">Auto-DJ picks something complementary.</div>
+      </div>
+      <div class="cmd">
+        <div class="phrase">"Skip this song"</div>
+        <div class="desc">Drop the current track, advance.</div>
+      </div>
+      <div class="cmd">
+        <div class="phrase">"Hey Reachy, stop"</div>
+        <div class="desc">Full stop: music off, robot still, DJ idle.</div>
+      </div>
+      <div class="cmd">
+        <div class="phrase">"Turn it up to 80"</div>
+        <div class="desc">Volume from 0-100.</div>
+      </div>
+      <div class="cmd">
+        <div class="phrase">"Look at me"</div>
+        <div class="desc">Glances toward the loudest face.</div>
+      </div>
+      <div class="cmd">
+        <div class="phrase">"Take a photo"</div>
+        <div class="desc">Captures a still so the model can react.</div>
+      </div>
+      <div class="cmd">
+        <div class="phrase">"Stop dancing"</div>
+        <div class="desc">Keep the music, freeze the moves.</div>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Tool surface</h2>
+    <div class="tools">
+      <div class="tool"><code>play_song</code> fetch a track + start the party</div>
+      <div class="tool"><code>skip_song</code> next track</div>
+      <div class="tool"><code>stop_party</code> halt everything</div>
+      <div class="tool"><code>stop_dance</code> keep music, freeze moves</div>
+      <div class="tool"><code>set_volume</code> speaker volume 0-100</div>
+      <div class="tool"><code>look_at_audience</code> orient to largest face</div>
+      <div class="tool"><code>look_at</code> glance overlay</div>
+      <div class="tool"><code>move_head</code> manual pitch/yaw/roll</div>
+      <div class="tool"><code>play_emotion</code> emotion clip</div>
+      <div class="tool"><code>set_face_tracking</code> toggle face follow</div>
+      <div class="tool"><code>take_photo</code> capture and return a still</div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Install</h2>
+    <p>The app installs through the Reachy Mini dashboard's app store — or directly via the daemon's API on your robot:</p>
+<pre><code>curl -s -X POST http://&lt;robot-ip&gt;:8000/api/apps/install \
+  -H 'Content-Type: application/json' \
+  -d '{"name": "reachy_mini_dance_party_app", "source_kind": "hf_space"}'</code></pre>
+    <p>Put your OpenAI API key on the Pi (the app uses <code>gpt-realtime</code>):</p>
+<pre><code>ssh pollen@&lt;robot-ip&gt; 'umask 077; echo "OPENAI_API_KEY=sk-..." &gt; ~/.env'
+ssh pollen@&lt;robot-ip&gt; 'sudo apt-get install -y ffmpeg'</code></pre>
+    <p>Full source, docs, and architecture notes on <a href="https://github.com/signalnine/reachy-dj">GitHub</a>.</p>
+  </section>
+
+  <footer>
+    Built on the Reachy Mini SDK. MIT licensed.
+  </footer>
+</div>
+</body>
+</html>

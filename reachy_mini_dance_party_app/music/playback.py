@@ -27,6 +27,7 @@ hardware. Defaults to ``sounddevice.OutputStream``.
 """
 from __future__ import annotations
 
+import logging
 import threading
 from collections import deque
 from pathlib import Path
@@ -35,6 +36,8 @@ from typing import Any, Callable, Optional
 import numpy as np
 
 from .mixer import Ducker, Mixer
+
+log = logging.getLogger(__name__)
 
 try:
     import sounddevice as _sd
@@ -63,11 +66,13 @@ class PlaybackEngine:
         sample_rate: int = 48000,
         channels: int = 1,
         stream_factory: Optional[Callable[..., Any]] = None,
+        device: Optional[str] = None,
     ) -> None:
         self._mixer = mixer
         self._ducker = ducker
         self._sample_rate = int(sample_rate)
         self._channels = int(channels)
+        self._preferred_device = device
 
         if stream_factory is None:
             if _DEFAULT_STREAM_FACTORY is None:  # pragma: no cover - host-dependent
@@ -89,6 +94,7 @@ class PlaybackEngine:
         # ``self._sample_rate`` and stored mono. The callback drains samples
         # from the head; ``feed_tts_chunk`` appends to the tail.
         self._tts_inlet: deque[np.ndarray] = deque()
+        self._tts_total_bytes: int = 0
 
         # Speech state for ducker (set by Realtime session).
         self._speech_active: bool = False
@@ -105,15 +111,25 @@ class PlaybackEngine:
     def load(self, wav_path: Path) -> None:
         """Load a wav file fully into memory as float32, shape (frames, channels).
 
-        The file's sample rate is recorded but the playback stream itself runs
-        at ``self._sample_rate`` (set at construction). Music samples are
-        *not* automatically resampled here — Task 15's scope assumes the
-        downloaded music is already at the playback rate or close enough; if
-        rate mismatch becomes an issue, resample at load time before storing.
+        Resamples to ``self._sample_rate`` at load time so the callback hot
+        path can pull samples without per-block resampling — boundary
+        ringing from short-block resamplers shows up as audible glitches in
+        practice.
         """
         import soundfile as sf  # local import; soundfile is a librosa dep
 
         data, samplerate = sf.read(str(wav_path), dtype="float32", always_2d=True)
+        if int(samplerate) != self._sample_rate:
+            from scipy.signal import resample_poly
+            from math import gcd
+            g = gcd(int(samplerate), self._sample_rate)
+            up = self._sample_rate // g
+            down = int(samplerate) // g
+            # resample_poly works per-axis; pass axis=0 for (frames, channels).
+            data = resample_poly(data, up=up, down=down, axis=0).astype(
+                np.float32, copy=False
+            )
+            samplerate = self._sample_rate
         with self._lock:
             self._buffer = np.ascontiguousarray(data, dtype=np.float32)
             self._music_sr = int(samplerate)
@@ -130,6 +146,9 @@ class PlaybackEngine:
         """
         if not pcm_bytes:
             return
+        if not self._tts_total_bytes:
+            log.info("first TTS chunk fed to playback (%d bytes @ %d Hz)", len(pcm_bytes), sample_rate)
+        self._tts_total_bytes += len(pcm_bytes)
         # PCM16 LE → int16 → float32 in [-1, 1].
         audio_int16 = np.frombuffer(pcm_bytes, dtype="<i2")
         if audio_int16.size == 0:
@@ -154,17 +173,44 @@ class PlaybackEngine:
         self._speech_active = bool(active)
 
     def start(self) -> None:
-        """Open the output stream and begin playback."""
+        """Open the output stream and begin playback.
+
+        Tries to route to the robot's ``reachymini_audio_sink`` ALSA device.
+        Falls back to the system default if that name isn't recognised
+        (e.g. running on a laptop without the .asoundrc aliases).
+        """
         if self._stream is not None:
             return  # idempotent
-        self._stream = self.stream_factory(
+        kwargs: dict[str, Any] = dict(
             samplerate=self._sample_rate,
             channels=self._channels,
             callback=self._callback,
             dtype="float32",
         )
-        self._stream.start()
+        # Prefer the daemon's named ALSA sink when available (only meaningful
+        # when running on the Pi). Wrapping in try/except keeps unit tests
+        # with FakeOutputStream constructors that don't accept ``device``
+        # working — those just won't see the kwarg.
+        device = self._preferred_device
+        if device is not None:
+            kwargs["device"] = device
+        try:
+            self._stream = self.stream_factory(**kwargs)
+            self._stream.start()
+        except Exception as exc:  # noqa: BLE001 — fall back to default device on any error
+            log.warning(
+                "stream open with device=%r failed (%s); retrying default device",
+                device, exc,
+            )
+            self._stream = None
+            kwargs.pop("device", None)
+            self._stream = self.stream_factory(**kwargs)
+            self._stream.start()
         self._is_playing = True
+        log.info(
+            "PlaybackEngine started: sr=%d channels=%d device=%r",
+            self._sample_rate, self._channels, kwargs.get("device"),
+        )
 
     def stop(self) -> None:
         """Halt playback and close the underlying stream."""

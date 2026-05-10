@@ -46,8 +46,8 @@ class LibraryDancer(threading.Thread):
         get_playback_time: Callable[[], float],
         enqueue_move: Callable[[str, float], None],
         get_grid: Callable[[], Optional[BeatGrid]],
-        recent_window: int = 4,
-        fit_window_s: float = 0.15,
+        recent_window: int = 10,
+        fit_window_s: float | None = None,
         rng: random.Random | None = None,
     ) -> None:
         super().__init__(name="LibraryDancer", daemon=True)
@@ -98,6 +98,18 @@ class LibraryDancer(threading.Thread):
         # Reset the next-target so the dancer immediately starts hunting for
         # beats from the new song's grid rather than continuing past the end
         # of the prior song.
+        self._next_target = 0.0
+        self._recent.clear()
+
+    def clear_grid(self) -> None:
+        """Pause beat-aligned move scheduling without killing the thread.
+
+        The worker keeps running but its ``_step_once`` short-circuits when
+        no grid is set — that lets ``stop_party`` halt dancing while leaving
+        the thread ready for the next ``start_with_grid`` call.
+        """
+        self._grid = None
+        self._owns_grid = True
         self._next_target = 0.0
         self._recent.clear()
 

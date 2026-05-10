@@ -121,6 +121,7 @@ class OpenAIRealtimeSession:
         self._stop_requested = asyncio.Event()
         self._connection: Any = None
         self._connected = asyncio.Event()
+        self._audio_delta_count = 0
         # Reference to the loop ``run()`` is executing on. Captured at the top
         # of :meth:`run` so background-thread callers of ``inject_*`` (DJ,
         # AudiencePush, etc.) can target the session loop via
@@ -240,6 +241,20 @@ class OpenAIRealtimeSession:
             {"type": "input_audio_buffer.append", "audio": encoded}
         )
 
+    def push_mic_chunk(self, pcm16_bytes: bytes) -> None:
+        """Thread-safe: schedule a mic chunk send onto the session loop.
+
+        Called from the mic-capture worker thread. Drops the chunk silently if
+        the websocket isn't connected yet (e.g. during reconnect backoff) —
+        server VAD will pick up audio once the next session is up.
+        """
+        if not pcm16_bytes:
+            return
+        encoded = base64.b64encode(pcm16_bytes).decode("ascii")
+        self._send_nowait(
+            {"type": "input_audio_buffer.append", "audio": encoded}
+        )
+
     # ------------------------------------------------------------------
     # Session lifecycle
     # ------------------------------------------------------------------
@@ -353,9 +368,14 @@ class OpenAIRealtimeSession:
 
     async def _handle_event(self, event: dict) -> None:
         kind = event.get("type", "")
-        # INFO temporarily while we debug the silent-session issue. Drop to
-        # debug once stable, or filter to non-audio-delta events.
-        if not kind.endswith(".audio.delta") and not kind.endswith(".output_audio.delta"):
+        # Track audio.delta event count without spamming a log line per chunk.
+        if kind.endswith(".audio.delta") or kind.endswith(".output_audio.delta"):
+            self._audio_delta_count += 1
+            if self._audio_delta_count == 1:
+                logger.info("Realtime: first audio chunk arrived (%s)", kind)
+            elif self._audio_delta_count % 50 == 0:
+                logger.info("Realtime: %d audio chunks received", self._audio_delta_count)
+        else:
             logger.info("Realtime event: %s", kind)
         if kind in ("session.created", "session.updated"):
             sess = event.get("session", {})
@@ -435,9 +455,16 @@ class OpenAIRealtimeSession:
 
         logger.info("Tool call: %s(%s) call_id=%s", name, args, call_id)
         try:
-            result = handler(args)
-            if asyncio.iscoroutine(result):
-                result = await result
+            # Tool handlers can be heavy (yt-dlp fetch, librosa beat-track) and
+            # would otherwise block the asyncio event loop — meaning no mic
+            # chunks get flushed, no incoming TTS frames are read, and the
+            # session looks frozen until the handler returns. Offload sync
+            # handlers to a thread so the loop stays responsive; await
+            # coroutines directly.
+            if asyncio.iscoroutinefunction(handler):
+                result = await handler(args)
+            else:
+                result = await asyncio.to_thread(handler, args)
         except Exception as exc:  # noqa: BLE001 - tool errors are routine
             logger.exception("Tool %r raised", name)
             result = {"error": str(exc)}
