@@ -138,6 +138,10 @@ class OpenAIRealtimeSession:
         # target it via run_coroutine_threadsafe (they don't have a running
         # loop of their own).
         self._loop = asyncio.get_running_loop()
+        logger.info(
+            "Realtime session starting: url=%s model=%s tools=%d",
+            self._url, self._model, len(self._tools),
+        )
         attempt = 0
         while not self._stop_requested.is_set():
             attempt += 1
@@ -241,12 +245,20 @@ class OpenAIRealtimeSession:
     # ------------------------------------------------------------------
 
     async def _run_one_session(self) -> None:
+        # NOTE: do NOT send ``OpenAI-Beta: realtime=v1`` — that header pins
+        # the connection to the older beta protocol which uses the flat
+        # session schema (``modalities``, ``output_audio_format``, etc).
+        # The GA ``gpt-realtime`` endpoint expects the nested ``audio.input``
+        # / ``audio.output`` schema, and rejects ``session.audio`` /
+        # ``session.type`` if the beta header is present. The OpenAI Python
+        # SDK's own ``client.realtime.connect`` doesn't set this header.
         headers = {
             "Authorization": f"Bearer {self._api_key}",
-            "OpenAI-Beta": "realtime=v1",
         }
         url = f"{self._url}?model={self._model}"
+        logger.info("Realtime: opening websocket to %s", self._url)
         conn = await self._connect(url, headers)
+        logger.info("Realtime: websocket connected, sending session.update")
 
         # Some connect callables return an async-context-manager. Honour both.
         if hasattr(conn, "__aenter__"):
@@ -269,6 +281,10 @@ class OpenAIRealtimeSession:
         self._connection = conn
         self._connected.set()
         await self._send_session_update()
+        # Trigger an unprompted opening turn — the system prompt instructs the
+        # model to greet on connect. Without this, the session stays silent
+        # until the user speaks first.
+        await self._send({"type": "response.create"})
         await self._event_loop()
 
     async def _send_session_update(self) -> None:
@@ -281,24 +297,36 @@ class OpenAIRealtimeSession:
             }
             for tool in self._tools
         ]
+        # GA gpt-realtime schema: nested `session.audio.{input,output}` config.
+        # The older flat keys (``modalities``, ``input_audio_format``,
+        # ``output_audio_format``, top-level ``turn_detection``) are silently
+        # ignored by the GA endpoint, which means session.updated comes back
+        # but no audio output gets emitted — the model speaks only in text
+        # transcripts (``response.audio_transcript.delta``) with zero
+        # ``response.output_audio.delta`` events. Verified against gpt-realtime
+        # 2026-05 by reading openai SDK ``RealtimeSessionCreateRequestParam``
+        # in apps_venv.
         frame = {
             "type": "session.update",
             "session": {
+                "type": "realtime",
+                "model": self._model,
+                "output_modalities": ["audio"],
                 "instructions": self._system_prompt,
                 "tools": tools_payload,
                 "tool_choice": "auto",
-                "modalities": ["audio", "text"],
-                "input_audio_format": "pcm16",
-                "output_audio_format": "pcm16",
-                # NOTE: pcm16 is implicitly 24kHz on the GA realtime API; the
-                # explicit ``input_audio_sample_rate`` / ``output_audio_sample_rate``
-                # fields the older beta accepted are now rejected as
-                # ``unknown_parameter`` (verified against gpt-realtime, 2026-05).
-                # ``self._sample_rate`` is still kept on the instance for the
-                # mixer / playback engine which need to know the rate.
-                "turn_detection": {
-                    "type": "server_vad",
-                    "interrupt_response": True,
+                "audio": {
+                    "input": {
+                        "format": {"type": "audio/pcm", "rate": 24000},
+                        "turn_detection": {
+                            "type": "server_vad",
+                            "interrupt_response": True,
+                        },
+                    },
+                    "output": {
+                        "format": {"type": "audio/pcm", "rate": 24000},
+                        "voice": "marin",
+                    },
                 },
             },
         }
@@ -325,7 +353,18 @@ class OpenAIRealtimeSession:
 
     async def _handle_event(self, event: dict) -> None:
         kind = event.get("type", "")
-        logger.debug("Realtime event: %s", kind)
+        # INFO temporarily while we debug the silent-session issue. Drop to
+        # debug once stable, or filter to non-audio-delta events.
+        if not kind.endswith(".audio.delta") and not kind.endswith(".output_audio.delta"):
+            logger.info("Realtime event: %s", kind)
+        if kind in ("session.created", "session.updated"):
+            sess = event.get("session", {})
+            logger.info(
+                "Session config (server view): output_modalities=%s audio.output=%s model=%s",
+                sess.get("output_modalities"),
+                sess.get("audio", {}).get("output"),
+                sess.get("model"),
+            )
 
         # Both naming conventions seen in the wild.
         if kind in ("response.audio.delta", "response.output_audio.delta"):

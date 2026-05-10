@@ -270,8 +270,15 @@ class ReachyMiniDancePartyApp:
             on_speech_state=playback.set_speech_active,
         )
         self._session = session  # exposed for tests
+
+        def _session_target() -> None:
+            try:
+                asyncio.run(session.run())
+            except Exception:  # noqa: BLE001 — surface silent thread crashes
+                log.exception("Realtime session thread crashed")
+
         session_thread = threading.Thread(
-            target=lambda: asyncio.run(session.run()),
+            target=_session_target,
             daemon=True,
             name="RealtimeSession",
         )
