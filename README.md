@@ -27,7 +27,6 @@ Full design and architecture rationale lives in `docs/plans/2026-05-09-dance-par
 
 - Reachy Mini wireless edition with daemon `>= 1.7.1`
 - Raspberry Pi CM4 with the Pollen `apps_venv` (`/venvs/apps_venv`) — this is the same venv the conversation app installs into and already has the heavy deps (mediapipe, librosa, opencv, gstreamer bindings, ...)
-- `ffmpeg` on the Pi for yt-dlp post-processing: `sudo apt-get install -y ffmpeg`
 - An OpenAI API key on a tier that has access to the `gpt-realtime` model
 - Network: speaker output and microphone capture both route through the daemon's GStreamer pipeline (`media_manager.push_audio_sample` / `get_audio_sample`), camera via its IPC source. The app does not open ALSA / PortAudio devices itself.
 
@@ -118,7 +117,7 @@ If you still see WebRTC errors, restart the daemon (see above).
 ssh pollen@192.168.1.128 '/venvs/apps_venv/bin/pip install --upgrade yt-dlp'
 ```
 
-**`ffprobe and ffmpeg not found`** when fetching a song. The daemon's app launcher uses a restricted `PATH`. Install ffmpeg system-wide and the fetcher will locate it via absolute path:
+**`ffprobe and ffmpeg not found`** when fetching a song. The app falls back to `static-ffmpeg` which downloads the binaries on first use, but if that network call fails (e.g. offline first-boot), install ffmpeg system-wide:
 
 ```bash
 ssh pollen@192.168.1.128 'sudo apt-get install -y ffmpeg'

@@ -48,12 +48,17 @@ def _duration_filter(info: dict) -> str | None:
 
 
 def _find_ffmpeg() -> str | None:
-    """Locate ffmpeg, falling back to common paths if PATH is restricted.
+    """Locate ffmpeg, falling back to common paths and a static download.
 
-    The reachy-mini daemon launches apps with a minimal environment that
-    sometimes omits /usr/bin from PATH, so ``shutil.which`` returns ``None``
-    even though ffmpeg is installed. Checking absolute paths ourselves lets
-    yt-dlp postprocess audio when launched under the daemon.
+    Order of preference:
+      1. ``shutil.which("ffmpeg")`` — picks up a system install on a normal PATH.
+      2. ``/usr/bin/ffmpeg`` / ``/usr/local/bin/ffmpeg`` — the daemon's app
+         launcher trims PATH so ``which`` misses these; cover the common
+         install location directly.
+      3. ``static_ffmpeg`` — pure-Python package that downloads platform
+         binaries (linux_arm64 / linux_x64 / win64 / osx_arm64) on first
+         call. Lets the app work out-of-the-box on a fresh install without
+         the user having to ``apt-get install ffmpeg``.
     """
     found = shutil.which("ffmpeg")
     if found:
@@ -61,7 +66,15 @@ def _find_ffmpeg() -> str | None:
     for candidate in ("/usr/bin/ffmpeg", "/usr/local/bin/ffmpeg"):
         if Path(candidate).exists():
             return candidate
-    return None
+    try:
+        from static_ffmpeg.run import (
+            get_or_fetch_platform_executables_else_raise,
+        )
+        ffmpeg_bin, _ffprobe_bin = get_or_fetch_platform_executables_else_raise()
+        return str(ffmpeg_bin)
+    except Exception as exc:  # noqa: BLE001
+        _log.warning("static-ffmpeg unavailable: %s", exc)
+        return None
 
 
 class FetchError(Exception):

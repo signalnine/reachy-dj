@@ -116,6 +116,33 @@ def _prewarm_librosa() -> None:
         log.warning("librosa pre-warm failed (will JIT lazily): %s", exc)
 
 
+def _prefetch_static_ffmpeg() -> None:
+    """Trigger static-ffmpeg's binary download in the background.
+
+    The package downloads ffmpeg + ffprobe (~50MB) on first use. Doing it
+    here means the first play_song call doesn't stall on the download.
+    No-op if a system ffmpeg is already on PATH (yt-dlp will find that
+    first) or if static-ffmpeg already has the binaries cached.
+    """
+    try:
+        import time
+        import shutil as _shutil
+        if _shutil.which("ffmpeg"):
+            log.info("system ffmpeg present, skipping static-ffmpeg prefetch")
+            return
+        from static_ffmpeg.run import (
+            get_or_fetch_platform_executables_else_raise,
+        )
+        t0 = time.monotonic()
+        ffmpeg_bin, _ = get_or_fetch_platform_executables_else_raise()
+        log.info(
+            "static-ffmpeg ready in %.1fs (%s)",
+            time.monotonic() - t0, ffmpeg_bin,
+        )
+    except Exception as exc:  # noqa: BLE001
+        log.warning("static-ffmpeg prefetch failed: %s", exc)
+
+
 def _start_song_progress_watcher(
     dj: Any,
     playback: Any,
@@ -528,6 +555,9 @@ class ReachyMiniDancePartyApp:
         # incurred inside play_song while the realtime session looks frozen.
         threading.Thread(
             target=_prewarm_librosa, daemon=True, name="LibrosaPreWarm",
+        ).start()
+        threading.Thread(
+            target=_prefetch_static_ffmpeg, daemon=True, name="FfmpegPreFetch",
         ).start()
 
         try:

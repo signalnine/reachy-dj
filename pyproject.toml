@@ -18,6 +18,7 @@ dependencies = [
   "python-dotenv",
   "fastapi",   # local settings UI server
   "uvicorn",   # ASGI runner for the settings server
+  "static-ffmpeg>=3.0",  # bundled ffmpeg+ffprobe for yt-dlp postprocessing
 ]
 
 [project.optional-dependencies]
