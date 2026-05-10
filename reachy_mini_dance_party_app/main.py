@@ -52,6 +52,10 @@ from reachy_mini_dance_party_app.vision.audience import AudiencePush
 from reachy_mini_dance_party_app.vision.camera_worker import CameraWorker
 from reachy_mini_dance_party_app.vision.face_tracker import FaceTracker
 from reachy_mini_dance_party_app.voice.openai_realtime import OpenAIRealtimeSession
+from reachy_mini_dance_party_app.settings_server import (
+    build_app as _build_settings_app,
+    start_in_thread as _start_settings_server,
+)
 
 
 log = logging.getLogger(__name__)
@@ -491,9 +495,17 @@ def _face_offset_provider(face_tracker: FaceTracker):
 class ReachyMiniDancePartyApp:
     """Runnable entry point that assembles every thread + lifecycle."""
 
+    # Surfaced on the Reachy Mini dashboard as a "Settings" link. The daemon
+    # parses this attribute directly from main.py source via regex (see
+    # ``reachy_mini.apps.sources.local_common_venv._get_custom_app_url_from_file``)
+    # so the literal here matters — don't replace with an f-string or constant.
+    custom_app_url: str | None = "http://0.0.0.0:8050"
+
     def __init__(self) -> None:
         self._stack = ExitStack()
         self._stop_event = threading.Event()
+        self._dj: Any = None
+        self._playback: Any = None
         log.info("ReachyMiniDancePartyApp initialized")
 
     # ------------------------------------------------------------------
@@ -707,6 +719,34 @@ class ReachyMiniDancePartyApp:
             stop_event=progress_stop,
         )
         self._stack.callback(progress_stop.set)
+
+        # 9d. Local settings UI. Reachable at the URL declared in
+        # ``custom_app_url`` on this class. The Reachy Mini dashboard shows a
+        # "Settings" link to it. Lets the user paste an OpenAI API key,
+        # see live status, and skip/stop without using voice.
+        def _do_skip() -> None:
+            playback.stop()
+            dancer.clear_grid()
+            dj.song_ended()
+
+        def _do_stop() -> None:
+            playback.stop()
+            dancer.clear_grid()
+            dj.stop_party()
+
+        settings_app = _build_settings_app(
+            get_dj=lambda: self._dj,
+            get_playback=lambda: self._playback,
+            on_skip=_do_skip,
+            on_stop=_do_stop,
+            env_path=Path.home() / ".env",
+        )
+        settings_server, _settings_thread = _start_settings_server(
+            settings_app, host="0.0.0.0", port=8050,
+        )
+        def _stop_settings() -> None:
+            settings_server.should_exit = True
+        self._stack.callback(_stop_settings)
 
         # 10. Audience push timer. Sends summary JSON via the session's
         # system-event injection.

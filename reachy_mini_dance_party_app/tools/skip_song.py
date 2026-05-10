@@ -17,7 +17,10 @@ def make(ctx: AppContext) -> Tool:
         # Halt audio and beat-aligned dance scheduling, then notify DJ so it
         # can either return to IDLE or trigger the next auto-DJ pick.
         ctx.playback.stop()
-        ctx.dancer.stop()
+        # clear_grid pauses the dancer without killing its thread, so the
+        # next play_song can re-arm it. dancer.stop() would tear down the
+        # worker permanently.
+        ctx.dancer.clear_grid()
         ctx.dj.song_ended()
         return {"ok": True}
 
