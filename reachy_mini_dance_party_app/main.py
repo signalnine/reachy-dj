@@ -60,6 +60,40 @@ log = logging.getLogger(__name__)
 _FRAME_FETCHER_DEFAULT_FOV_DEG = 80.0  # imx708 horizontal FOV (small-angle approx)
 
 
+def _load_env_files() -> None:
+    """Load .env from common locations into os.environ.
+
+    The daemon's app launcher (`reachy_mini.apps.manager`) copies the daemon's
+    own environment when starting an app, which omits anything the user dropped
+    in ~/.env. Load it ourselves so the same configuration works whether the
+    app is launched from the dashboard, via `python -m`, or via systemd.
+
+    Existing env vars take precedence (does not overwrite). Missing files are
+    silently ignored. python-dotenv is a declared dependency.
+    """
+    try:
+        from dotenv import load_dotenv
+    except ImportError:
+        log.debug("python-dotenv not installed; skipping .env load")
+        return
+    seen: set[Path] = set()
+    candidates = [
+        Path.home() / ".env",
+        Path.cwd() / ".env",
+        Path("/home/pollen/.env"),  # fallback for dashboard-launched runs
+    ]
+    for p in candidates:
+        try:
+            resolved = p.resolve()
+        except OSError:
+            continue
+        if resolved in seen or not resolved.is_file():
+            continue
+        seen.add(resolved)
+        load_dotenv(resolved, override=False)
+        log.info("loaded environment from %s", resolved)
+
+
 def load_system_prompt() -> str:
     """Load the DJ persona system prompt shipped with the package."""
     try:
@@ -141,9 +175,13 @@ class ReachyMiniDancePartyApp:
 
     def run(self) -> None:
         """Boot every component, install signal handlers, block until stop."""
+        _load_env_files()
         api_key = os.environ.get("OPENAI_API_KEY")
         if not api_key:
-            raise RuntimeError("OPENAI_API_KEY environment variable required")
+            raise RuntimeError(
+                "OPENAI_API_KEY not set. Put OPENAI_API_KEY=sk-... in ~/.env "
+                "or export it before launching the app."
+            )
 
         try:
             self._assemble(api_key)
