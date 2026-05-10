@@ -415,10 +415,21 @@ def _make_sdk_tts_push(
 
     The Realtime API delivers little-endian PCM16 mono at ``src_sr`` (24kHz on
     GA gpt-realtime). The SDK's ``media_manager.push_audio_sample`` expects
-    float32 ndarray at ``dst_sr`` with ``channels`` channels. We resample only
-    if the rates differ; we duplicate to N channels by simple broadcast.
+    float32 ndarray at ``dst_sr`` with ``channels`` channels. We resample with
+    ``scipy.signal.resample_poly`` (C-based, no numba JIT — librosa.resample
+    JIT-compiles on first call and blocked the realtime event loop for ~40s
+    on the Pi, dropping the greeting before any audio reached the speaker).
     """
     import numpy as np
+    from math import gcd
+    from scipy.signal import resample_poly
+
+    if src_sr != dst_sr:
+        g = gcd(src_sr, dst_sr)
+        up = dst_sr // g
+        down = src_sr // g
+    else:
+        up = down = 1
 
     first_logged = {"done": False}
 
@@ -429,11 +440,10 @@ def _make_sdk_tts_push(
         if audio_i16.size == 0:
             return
         audio_f32 = (audio_i16.astype(np.float32) / 32768.0)
-        if src_sr != dst_sr:
-            import librosa  # heavy import; deferred
-            audio_f32 = librosa.resample(
-                y=audio_f32, orig_sr=src_sr, target_sr=dst_sr
-            ).astype(np.float32, copy=False)
+        if up != 1 or down != 1:
+            audio_f32 = resample_poly(audio_f32, up=up, down=down).astype(
+                np.float32, copy=False
+            )
         if channels > 1:
             # Mono → N-channel broadcast (shape (frames, channels)).
             audio_f32 = np.tile(audio_f32[:, None], (1, channels))
