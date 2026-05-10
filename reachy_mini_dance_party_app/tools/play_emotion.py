@@ -41,7 +41,21 @@ SCHEMA = {
 
 @dataclass(frozen=True)
 class EmotionMove:
-    """Placeholder for the real EmotionMove that lands in moves.py (Task 16)."""
+    """Placeholder emotion move; see TODO(T17) below.
+
+    TODO(T17): The reachy_mini SDK and ``reachy_mini_dances_library`` available
+    in the laptop venv expose ``DanceMove`` (a beat-driven dance primitive) but
+    no curated emotion-clip catalog matching names like ``happy``, ``sad``,
+    ``celebrate`` etc. The conv app shipped its own emotion library; that
+    asset wasn't lifted into this app. Until the emotion catalog ships, the
+    placeholder dataclass keeps the tool wire-compatible: the LLM can call
+    ``play_emotion``, the AppContext's move-queue adapter receives the object,
+    and the resulting no-op is logged. Real wireup needs either:
+
+    * a small ``EmotionMove(Move)`` subclass that interpolates an emotion
+      curve loaded from a packaged JSON file, or
+    * a name-to-DanceMove fallback table for a subset of expressive cues.
+    """
 
     name: str
 

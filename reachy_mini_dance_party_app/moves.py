@@ -718,14 +718,94 @@ class MovementManager:
         stats.reset()
 
     def _update_face_tracking(self, current_time: float) -> None:
-        """Get face tracking offsets from camera worker thread."""
-        if self.camera_worker is not None:
+        """Get face tracking offsets from the registered provider or camera worker.
+
+        The dance-party app uses :meth:`set_face_offset_provider` to inject a
+        callable returning a 6-tuple ``(x, y, z, roll, pitch, yaw)``. When set,
+        that takes precedence over any ``camera_worker.get_face_tracking_offsets``
+        source. Falls back to neutral when neither is wired up.
+        """
+        provider = getattr(self, "_face_offset_provider", None)
+        if provider is not None:
+            try:
+                offsets = provider()
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("face offset provider raised: %s", exc)
+                offsets = (0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+            self.state.face_tracking_offsets = tuple(offsets)
+        elif self.camera_worker is not None:
             # Get face tracking offsets from camera worker thread
             offsets = self.camera_worker.get_face_tracking_offsets()
             self.state.face_tracking_offsets = offsets
         else:
             # No camera worker, use neutral offsets
             self.state.face_tracking_offsets = (0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+
+    # ------------------------------------------------------------------
+    # Dance-party wireup helpers (added by Task 16)
+    # ------------------------------------------------------------------
+
+    def set_face_offset_provider(self, provider: Any) -> None:
+        """Register a callable returning ``(x, y, z, roll, pitch, yaw)`` offsets.
+
+        Overrides ``camera_worker.get_face_tracking_offsets`` as the source for
+        secondary head offsets. Pass ``None`` to clear and fall back to the
+        camera-worker source.
+        """
+        self._face_offset_provider = provider
+
+    def queue_move_named(self, name: str, scheduled_at: float | None = None) -> None:
+        """Look up ``name`` in ``reachy_mini_dances_library`` and enqueue it.
+
+        ``scheduled_at`` is a wall-clock target the dancer would like the move
+        to start at. The MovementManager runs a sequential queue without a
+        scheduler API of its own, so the time is currently logged at debug
+        only — moves still play back-to-back. (TODO(T17): respect the schedule
+        by sleeping inside the worker until ``scheduled_at`` before popping.)
+        """
+        try:
+            from reachy_mini_dances_library.dance_move import (  # noqa: PLC0415
+                AVAILABLE_MOVES,
+                DanceMove,
+            )
+        except Exception as exc:  # noqa: BLE001 - library is Pi-only
+            logger.warning("queue_move_named(%r): dances library unavailable: %s", name, exc)
+            return
+
+        # Some upstream callers may pass the special "__fill__" sentinel from
+        # dance.picker when no real move fits the beat; just no-op for now.
+        if name == "__fill__":
+            return
+
+        if name not in AVAILABLE_MOVES:
+            logger.warning("queue_move_named(%r): unknown dance move; skipping", name)
+            return
+
+        try:
+            move = DanceMove(name)
+        except Exception as exc:  # noqa: BLE001
+            logger.error("Failed to construct DanceMove(%r): %s", name, exc)
+            return
+        if scheduled_at is not None:
+            logger.debug("queue_move_named(%r) scheduled_at=%.3f", name, scheduled_at)
+        self.queue_move(move)
+
+    @property
+    def tool_move_queue(self) -> "_ToolMoveQueueAdapter":
+        """Return an adapter exposing ``.put(move)`` to the AppContext / tools.
+
+        The MovementManager's primary-move enqueue API is :meth:`queue_move`,
+        which routes through the cross-thread command queue. Tool handlers and
+        unit tests call ``ctx.move_queue.put(move)`` instead, so we expose this
+        thin adapter to bridge the two without coupling tools to the manager.
+        """
+        # Cache so identity is stable across calls (handy for debugging).
+        adapter = getattr(self, "_tool_move_queue_adapter", None)
+        if adapter is None:
+            adapter = _ToolMoveQueueAdapter(self)
+            self._tool_move_queue_adapter = adapter
+        return adapter
+
 
     def start(self) -> None:
         """Start the worker thread that drives the 100 Hz control loop."""
@@ -862,3 +942,18 @@ class MovementManager:
                 time.sleep(sleep_time)
 
         logger.debug("Movement control loop stopped")
+
+
+class _ToolMoveQueueAdapter:
+    """Tiny adapter mapping ``.put(move)`` -> ``MovementManager.queue_move``.
+
+    Lives at module level so :class:`MovementManager.tool_move_queue` can return
+    it without coupling tools to the manager. Kept private (single underscore)
+    because callers should reach it via :attr:`MovementManager.tool_move_queue`.
+    """
+
+    def __init__(self, manager: "MovementManager") -> None:
+        self._manager = manager
+
+    def put(self, move: Any) -> None:
+        self._manager.queue_move(move)

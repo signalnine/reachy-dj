@@ -69,6 +69,12 @@ class LibraryDancer(threading.Thread):
         # (gives the move worker time to schedule the start).
         self._lead_s: float = 0.05
 
+        # Optional internally-held grid; updated by ``set_grid`` /
+        # ``start_with_grid``. Construction is unchanged: callers may inject a
+        # grid via ``get_grid`` or via the ``set_grid`` mutator below.
+        self._grid: Optional[BeatGrid] = None
+        self._owns_grid: bool = False
+
     # ---------- Lifecycle ----------
 
     def run(self) -> None:
@@ -79,6 +85,27 @@ class LibraryDancer(threading.Thread):
         self._stop_event.set()
         if self.is_alive():
             self.join(timeout=2.0)
+
+    def set_grid(self, grid: BeatGrid) -> None:
+        """Install a new ``BeatGrid`` to drive future scheduling decisions.
+
+        Tests typically inject ``get_grid`` directly; production callers
+        (e.g. ``play_song.handler``) prefer this convenience over wiring up
+        a closure for every song change.
+        """
+        self._grid = grid
+        self._owns_grid = True
+        # Reset the next-target so the dancer immediately starts hunting for
+        # beats from the new song's grid rather than continuing past the end
+        # of the prior song.
+        self._next_target = 0.0
+        self._recent.clear()
+
+    def start_with_grid(self, grid: BeatGrid) -> None:
+        """Convenience: install ``grid`` and start the worker thread."""
+        self.set_grid(grid)
+        if not self.is_alive():
+            self.start()
 
     # ---------- Hookable sleeper (overridden in tests) ----------
 
@@ -94,7 +121,10 @@ class LibraryDancer(threading.Thread):
     # ---------- Single iteration ----------
 
     def _step_once(self) -> None:
-        grid = self._get_grid()
+        # Internally-held grid (via set_grid / start_with_grid) wins over the
+        # injected getter so production callers don't have to maintain a
+        # parallel closure.
+        grid = self._grid if self._owns_grid else self._get_grid()
         if grid is None:
             # No song loaded yet — wait a tick and return; tests will not
             # exercise this branch (they always provide a grid).

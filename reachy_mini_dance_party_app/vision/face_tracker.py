@@ -96,6 +96,19 @@ class FaceTracker:
         self._has_face: bool = False
         self._last_face_seen: Optional[float] = None
 
+        # Runtime-toggleable: when False, get_secondary_offset returns zero.
+        # The background polling thread keeps running so we can re-enable
+        # without losing state, but its updates are gated at read time.
+        self._enabled: bool = True
+
+        # Manual override window: set by the ``look_at`` LLM tool to bias the
+        # head pose to a specific target for a short duration. While
+        # ``time.monotonic() < self._override_until_t`` the override is
+        # returned in place of the face-derived offset.
+        self._override_yaw_rad: float = 0.0
+        self._override_pitch_rad: float = 0.0
+        self._override_until_t: float = 0.0
+
         self._lock = threading.Lock()
         self._stop_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
@@ -137,13 +150,60 @@ class FaceTracker:
         Returns a dict with keys ``yaw`` and ``pitch`` in radians plus a
         ``has_face`` bool. The move worker may use this to additively bias
         the head pose on top of the active dance move.
+
+        When ``set_enabled(False)`` has been called, returns the zero offset
+        regardless of frame data. When a manual override is active (set via
+        :meth:`set_secondary_offset`) and not yet expired, the override pose
+        is returned in place of the face-derived one.
         """
+        now = time.monotonic()
         with self._lock:
+            if not self._enabled:
+                return {"yaw": 0.0, "pitch": 0.0, "has_face": False}
+            if now < self._override_until_t:
+                return {
+                    "yaw": self._override_yaw_rad,
+                    "pitch": self._override_pitch_rad,
+                    "has_face": self._has_face,
+                }
             return {
                 "yaw": self._yaw_rad,
                 "pitch": self._pitch_rad,
                 "has_face": self._has_face,
             }
+
+    def set_enabled(self, enabled: bool) -> None:
+        """Runtime toggle for face tracking.
+
+        When False, :meth:`get_secondary_offset` returns the zero offset
+        regardless of detected faces. The background thread keeps running so
+        the smoothing state stays warm for re-enabling.
+        """
+        with self._lock:
+            self._enabled = bool(enabled)
+
+    def set_secondary_offset(
+        self,
+        x: float = 0.0,
+        y: float = 0.0,
+        duration_s: float = 1.0,
+        *,
+        x_rad: Optional[float] = None,
+        y_rad: Optional[float] = None,
+    ) -> None:
+        """Manually override the secondary head offset for ``duration_s`` seconds.
+
+        ``x``/``y`` are interpreted as radian yaw/pitch offsets (small;
+        typically <0.3 rad). The aliases ``x_rad``/``y_rad`` are accepted to
+        match the task-spec naming. After the override expires, normal
+        face-driven behavior resumes automatically — no explicit reset needed.
+        """
+        yaw = float(x_rad if x_rad is not None else x)
+        pitch = float(y_rad if y_rad is not None else y)
+        with self._lock:
+            self._override_yaw_rad = yaw
+            self._override_pitch_rad = pitch
+            self._override_until_t = time.monotonic() + max(0.0, float(duration_s))
 
     # -- thread loop ----------------------------------------------------------
 
