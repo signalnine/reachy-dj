@@ -33,4 +33,7 @@ build-backend = "setuptools.build_meta"
 [tool.pytest.ini_options]
 markers = [
   "requires_robot: integration test that needs a live ReachyMini daemon at localhost:8000",
+  "requires_network: integration test that performs real network I/O",
+  "slow: integration test that takes more than a few seconds",
 ]
+addopts = "-m 'not slow and not requires_network'"
