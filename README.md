@@ -125,4 +125,4 @@ See `docs/plans/2026-05-09-dance-party-app-design.md` for the full design. One s
 
 ## License
 
-TBD — same as the Reachy Mini SDK upstream until specified otherwise.
+MIT. See [LICENSE](LICENSE).
