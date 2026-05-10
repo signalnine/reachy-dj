@@ -301,16 +301,21 @@
 
   <section>
     <h2>Install</h2>
-    <p>The app installs through the Reachy Mini dashboard's app store — or directly via the daemon's API on your robot:</p>
+    <p>Open the Reachy Mini dashboard at <code>http://&lt;robot-ip&gt;:8000</code>, find <strong>reachy_mini_dance_party_app</strong> in the app store, click <em>Install</em>, then <em>Start</em>. Or install via the daemon API:</p>
 <pre><code>curl -s -X POST http://&lt;robot-ip&gt;:8000/api/apps/install \
   -H 'Content-Type: application/json' \
   -d '{"name": "reachy_mini_dance_party_app", "source_kind": "hf_space"}'</code></pre>
-    <p>Full source, docs, and architecture notes on <a href="https://github.com/signalnine/reachy-dj">GitHub</a>.</p>
+    <p><code>ffmpeg</code> is bundled — no manual install needed. Full source, docs, and architecture notes on <a href="https://github.com/signalnine/reachy-dj">GitHub</a>.</p>
+  </section>
+
+  <section>
+    <h2>Local settings UI</h2>
+    <p>Once the app is running, the dashboard shows a <strong>Settings</strong> link that opens a local web UI at <code>http://&lt;robot-ip&gt;:8050</code> — paste your OpenAI key, see live DJ state, skip songs, or stop the party without using voice.</p>
   </section>
 
   <section id="setup">
-    <h2>Set your OpenAI API key</h2>
-    <p>The app reads <code>OPENAI_API_KEY</code> from <code>~/.env</code> on the Pi. This form generates the SSH command to install it — your key <strong>never leaves this page</strong> (no network requests), it's just inserted into a copy-pasteable command for your terminal.</p>
+    <h2>Set your OpenAI API key (alternative)</h2>
+    <p>The local UI above is the easy path. If you'd rather configure it from your laptop, this form generates the SSH command — your key <strong>never leaves this page</strong> (no network requests), it's just inserted into a copy-pasteable command for your terminal.</p>
 
     <div class="form-row">
       <label for="robot-host">Robot hostname or IP</label>

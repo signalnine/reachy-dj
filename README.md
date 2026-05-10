@@ -19,7 +19,7 @@ Voice-controlled YouTube DJ + dance app for the Reachy Mini wireless edition. Ta
 
 ## Status
 
-V0.2. End-to-end verified on a Reachy Mini wireless: greeting, voice command recognition, YouTube fetch, beat analysis, music playback, beat-aligned dance moves, song-end auto-DJ handoff, and "stop"/"skip" voice commands all work. Pure-logic components have unit-test coverage (113 tests).
+V0.3. Installable from the Reachy Mini dashboard's app store. End-to-end verified on a Reachy Mini wireless: greeting, voice command recognition, YouTube fetch, beat analysis, music playback, beat-aligned dance moves, song-end auto-DJ handoff, "stop"/"skip" voice commands, and a local settings UI for managing the API key and controlling playback from a browser. Pure-logic components have unit-test coverage (113 tests).
 
 Full design and architecture rationale lives in `docs/plans/2026-05-09-dance-party-app-design.md`. The 18-task implementation plan is in `docs/plans/2026-05-09-dance-party-app.md`.
 
@@ -32,48 +32,82 @@ Full design and architecture rationale lives in `docs/plans/2026-05-09-dance-par
 
 ## Install
 
-From a laptop with SSH key auth to the Pi:
+**Recommended: install from the Reachy Mini dashboard.** Open the dashboard at `http://<robot-ip>:8000`, find "reachy_mini_dance_party_app" in the app store, click Install, then Start. The daemon does the rest — no SSH needed.
+
+Or install via the daemon API:
 
 ```bash
-git clone <this repo>
-cd reachy
-bash scripts/deploy.sh
+curl -s -X POST http://<robot-ip>:8000/api/apps/install \
+  -H 'Content-Type: application/json' \
+  -d '{"name": "reachy_mini_dance_party_app", "source_kind": "hf_space"}'
 ```
 
-The deploy script rsyncs the working tree to `/home/pollen/dance_party_app/` and runs `pip install -e` into `/venvs/apps_venv`. Override the target with `HOST=...` and `DEST=...`.
+`ffmpeg` is bundled — the [`static-ffmpeg`](https://pypi.org/project/static-ffmpeg/) dependency downloads `ffmpeg` + `ffprobe` for `linux_arm64` on first run (~50 MB, cached in the venv). If you already have system `ffmpeg` from apt it wins.
 
-Put your OpenAI key on the Pi at `~/.env` (mode 600):
+## Set your OpenAI API key
+
+Two ways:
+
+**1. In the browser (recommended).** After starting the app, open the dashboard. Click the "Settings" link next to the app — that opens the local UI at `http://<robot-ip>:8050`. Paste your key, click Save, click Restart App. The key is written to `~/.env` on the Pi (mode 600, never logged) and the app reloads.
+
+**2. SSH.** Drop it into `~/.env` directly:
 
 ```bash
-ssh pollen@192.168.1.128 'umask 077; echo "OPENAI_API_KEY=sk-..." > ~/.env'
+ssh pollen@<robot-ip> 'umask 077; echo "OPENAI_API_KEY=sk-..." > ~/.env'
 ```
 
-The dance-party app is not (yet) registered as an officially-installed Reachy Mini app, so the dashboard's app store will not list it. Start it manually instead.
-
-If the conversation app or any other app is currently running, stop it first so this app can grab the robot-app-lock, the camera, and the audio device:
+If another app is already running, stop it first so this one can grab the robot-app-lock, the camera, and the audio device:
 
 ```bash
-ssh pollen@192.168.1.128 'curl -s -X POST http://localhost:8000/api/apps/stop-current-app'
+curl -s -X POST http://<robot-ip>:8000/api/apps/stop-current-app
 ```
+
+## Local web UI
+
+While the app is running, `http://<robot-ip>:8050` serves a settings page (also linked from the dashboard) that shows:
+
+- OpenAI API key status (set / not set)
+- DJ state (idle / fetching / playing)
+- Current song + playback position
+- Buttons: Save Key, Restart App, Skip Song, Stop Party
+
+Status refreshes every 2 s.
 
 ## Usage
 
-Start the app with the env loaded:
+Once running you'll see in the logs:
+
+- `ReachyMiniDancePartyApp running`
+- `media acquired on daemon (LOCAL backend)`
+- `SDK audio sink ready: sr=... channels=...`
+- `mic capture started`
+- `SettingsServer running at http://0.0.0.0:8050`
+- `librosa.beat pre-warm complete in Ns` (one-time numba JIT, ~60 s on a Pi 5 — done in background)
+- `static-ffmpeg ready in Ns` (first install only)
+
+Then talk to the robot:
+
+- *"Hey Reachy, play some Daft Punk"* — fetches and starts a track with synced dance
+- *"Play something funkier"* — auto-DJ picks a complementary track
+- *"Skip this song"* / *"Next"* — drop current track, advance
+- *"Stop"* / *"Hey Reachy stop"* / *"Quiet"* — full stop
+- *"Turn it up to 80"* — volume 0-100
+- *"Take a photo"* — captures a still and shows it to the model
+
+The DJ persona lives in `reachy_mini_dance_party_app/prompts/system.md`.
+
+## Develop
+
+For local development with rapid iteration:
 
 ```bash
-ssh pollen@192.168.1.128 'set -a; source ~/.env; set +a; \
-  /venvs/apps_venv/bin/python -m reachy_mini_dance_party_app.main'
+git clone https://github.com/signalnine/reachy-dj
+cd reachy-dj
+bash scripts/deploy.sh                            # rsync to Pi + pip install -e
+ssh pollen@<robot-ip> '/venvs/apps_venv/bin/python -m reachy_mini_dance_party_app.main'
 ```
 
-You should see `ReachyMiniDancePartyApp running` in the log, followed by `mic capture started`, `SDK audio sink ready`, and `librosa.beat pre-warm complete in Ns` (the first run JIT-compiles librosa's beat tracker, ~60s on a Pi 5 — done in the background at startup so the first song doesn't stall). Then talk to the robot ("play me some Daft Punk", "play something else", "skip", "stop"). The DJ persona is in `reachy_mini_dance_party_app/prompts/system.md`.
-
-Stop with Ctrl-C / SIGTERM. The shutdown hook stops the music streamer, stops the dancer, releases the audio device, and resets the head to neutral.
-
-You can also launch it via the daemon's API once it's installed:
-
-```bash
-ssh pollen@192.168.1.128 'curl -s -X POST http://localhost:8000/api/apps/start-app/reachy_mini_dance_party_app'
-```
+`scripts/deploy.sh` rsyncs the working tree to `/home/pollen/dance_party_app/` and runs `pip install -e` into `/venvs/apps_venv`. Override the target with `HOST=...` and `DEST=...`.
 
 ## Voice tools
 
@@ -148,10 +182,12 @@ See `docs/plans/2026-05-09-dance-party-app-design.md` for the full design. One s
 - **Tools** (`tools/`) — `Tool` registry (name, description, JSON-schema parameters, handler) consumed by both the session.update payload and the dispatch table. Each tool's handler operates on a shared `AppContext` (DJ, dancer, mixer, playback, camera, face tracker, move queue, fetcher, analyzer, http client).
 - **Moves** (`moves.py`) — primary/secondary scheduler lifted from the conv app; sole writer to `robot.set_target`.
 - **Prompts** (`prompts/system.md`) — the DJ persona system prompt loaded via `importlib.resources`.
-- **Top-level** (`main.py`) — `ReachyMiniDancePartyApp` assembles every component on an `ExitStack` so shutdown unwinds in reverse order, installs SIGINT/SIGTERM handlers, and blocks on a stop-event. It also runs:
-  - **MicCapture** thread: pulls 16 kHz stereo from `media_manager.get_audio_sample`, downmixes and resamples to 24 kHz mono PCM16, pushes to the Realtime websocket.
-  - **MusicStreamer** thread: replaces `sounddevice.OutputStream`; pulls mixed audio from `PlaybackEngine`'s callback and pushes to `media_manager.push_audio_sample` (the GStreamer IPC sink the daemon owns).
-  - **SongProgress** thread: watches `playback_time` vs song duration, injects "Track ending in ~Ns" at -20s and "Track finished" at end of song so the DJ doesn't guess transitions.
+- **Top-level** (`main.py`) — `ReachyMiniDancePartyApp` assembles every component on an `ExitStack` so shutdown unwinds in reverse order, installs SIGINT/SIGTERM handlers, and blocks on a stop-event. The `custom_app_url` class attribute (`http://0.0.0.0:8050`) is parsed by the daemon and rendered as a "Settings" link on the dashboard. It runs these background threads:
+  - **MicCapture**: pulls 16 kHz stereo from `media_manager.get_audio_sample`, downmixes and resamples to 24 kHz mono PCM16, pushes to the Realtime websocket.
+  - **MusicStreamer**: replaces `sounddevice.OutputStream`; pulls mixed audio from `PlaybackEngine`'s callback and pushes to `media_manager.push_audio_sample` (the GStreamer IPC sink the daemon owns).
+  - **SongProgress**: watches `playback_time` vs song duration, injects "Track ending in ~Ns" at -20s and "Track finished" at end of song so the DJ doesn't guess transitions.
+  - **SettingsServer** (`settings_server.py`): FastAPI on port 8050 — key persistence, status, manual skip/stop.
+  - **LibrosaPreWarm** + **FfmpegPreFetch**: one-shot startup threads that JIT-compile librosa.beat and download the `static-ffmpeg` binaries so the first song doesn't stall.
 
 ## License
 
