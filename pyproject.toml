@@ -18,7 +18,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8", "pytest-asyncio", "pytest-mock", "ruff"]
+dev = ["pytest>=8", "pytest-asyncio", "pytest-mock", "ruff", "jsonschema>=4.21"]
 
 [project.entry-points."reachy_mini_apps"]
 reachy_mini_dance_party_app = "reachy_mini_dance_party_app.main:ReachyMiniDancePartyApp"
