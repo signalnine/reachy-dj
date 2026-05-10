@@ -10,6 +10,7 @@ suggested_storage: large
 tags:
   - reachy_mini
   - reachy_mini_python_app
+  - Music
 ---
 
 # reachy_mini_dance_party_app

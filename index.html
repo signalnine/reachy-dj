@@ -148,6 +148,87 @@
     0%, 100% { opacity: 1; transform: scale(1); }
     50%      { opacity: 0.4; transform: scale(1.3); }
   }
+  .form-row {
+    margin-bottom: 1rem;
+  }
+  .form-row label {
+    display: block;
+    margin-bottom: 0.4rem;
+    font-size: 0.9rem;
+    color: var(--muted);
+    letter-spacing: 0.02em;
+  }
+  .form-row input {
+    width: 100%;
+    padding: 0.7rem 0.9rem;
+    border-radius: 8px;
+    border: 1px solid rgba(255, 255, 255, 0.15);
+    background: rgba(0, 0, 0, 0.35);
+    color: var(--text);
+    font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    font-size: 0.92rem;
+  }
+  .form-row input:focus {
+    outline: none;
+    border-color: var(--accent);
+  }
+  .form-row small {
+    display: block;
+    margin-top: 0.4rem;
+    color: var(--muted);
+    font-size: 0.78rem;
+  }
+  button#gen-btn, button#clear-btn {
+    appearance: none;
+    border: 1px solid transparent;
+    padding: 0.7rem 1.2rem;
+    border-radius: 8px;
+    font-size: 0.95rem;
+    font-weight: 600;
+    cursor: pointer;
+    transition: transform 0.1s ease, filter 0.15s ease;
+    margin-right: 0.5rem;
+  }
+  button#gen-btn {
+    background: linear-gradient(90deg, var(--accent), var(--accent-2));
+    color: #1a0033;
+  }
+  button#gen-btn:hover { filter: brightness(1.1); }
+  button#gen-btn:active { transform: translateY(1px); }
+  button#clear-btn.ghost {
+    background: transparent;
+    border-color: rgba(255, 255, 255, 0.25);
+    color: var(--text);
+  }
+  button#clear-btn.ghost:hover { border-color: var(--accent); }
+  .codeblock-wrap {
+    position: relative;
+    margin-bottom: 1rem;
+  }
+  .copy-btn {
+    position: absolute;
+    top: 0.5rem;
+    right: 0.5rem;
+    background: rgba(0, 232, 255, 0.18);
+    color: var(--accent-2);
+    border: 1px solid rgba(0, 232, 255, 0.35);
+    padding: 0.25rem 0.65rem;
+    border-radius: 5px;
+    font-size: 0.78rem;
+    cursor: pointer;
+    z-index: 1;
+  }
+  .copy-btn:hover { background: rgba(0, 232, 255, 0.28); }
+  .copy-btn.copied {
+    background: rgba(50, 200, 80, 0.25);
+    color: #b6f4c2;
+    border-color: rgba(50, 200, 80, 0.45);
+  }
+  .success {
+    color: #b6f4c2;
+    font-size: 0.9rem;
+    margin: 0 0 0.6rem;
+  }
 </style>
 </head>
 <body>
@@ -224,15 +305,112 @@
 <pre><code>curl -s -X POST http://&lt;robot-ip&gt;:8000/api/apps/install \
   -H 'Content-Type: application/json' \
   -d '{"name": "reachy_mini_dance_party_app", "source_kind": "hf_space"}'</code></pre>
-    <p>Put your OpenAI API key on the Pi (the app uses <code>gpt-realtime</code>):</p>
-<pre><code>ssh pollen@&lt;robot-ip&gt; 'umask 077; echo "OPENAI_API_KEY=sk-..." &gt; ~/.env'
-ssh pollen@&lt;robot-ip&gt; 'sudo apt-get install -y ffmpeg'</code></pre>
     <p>Full source, docs, and architecture notes on <a href="https://github.com/signalnine/reachy-dj">GitHub</a>.</p>
+  </section>
+
+  <section id="setup">
+    <h2>Set your OpenAI API key</h2>
+    <p>The app reads <code>OPENAI_API_KEY</code> from <code>~/.env</code> on the Pi. This form generates the SSH command to install it — your key <strong>never leaves this page</strong> (no network requests), it's just inserted into a copy-pasteable command for your terminal.</p>
+
+    <div class="form-row">
+      <label for="robot-host">Robot hostname or IP</label>
+      <input id="robot-host" type="text" placeholder="reachymini.local or 192.168.1.128" />
+    </div>
+    <div class="form-row">
+      <label for="api-key">OpenAI API key</label>
+      <input id="api-key" type="password" placeholder="sk-..." autocomplete="off" />
+      <small>Stays in your browser. Used only to render the command below.</small>
+    </div>
+
+    <button id="gen-btn" type="button">Generate setup command</button>
+    <button id="clear-btn" type="button" class="ghost">Clear</button>
+
+    <div id="output" hidden>
+      <p class="success">Copy and run this from your laptop. SSH will prompt for the Pi's password (default <code>root</code>).</p>
+      <div class="codeblock-wrap">
+        <button class="copy-btn" data-target="cmd-1" type="button">Copy</button>
+<pre><code id="cmd-1"></code></pre>
+      </div>
+      <p>Then restart the app so it picks up the new key:</p>
+      <div class="codeblock-wrap">
+        <button class="copy-btn" data-target="cmd-2" type="button">Copy</button>
+<pre><code id="cmd-2"></code></pre>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2>One-time Pi setup</h2>
+    <p>The app needs <code>ffmpeg</code> for yt-dlp postprocessing (only needs to run once per robot):</p>
+<pre><code>ssh pollen@&lt;robot-ip&gt; 'sudo apt-get install -y ffmpeg'</code></pre>
   </section>
 
   <footer>
     Built on the Reachy Mini SDK. MIT licensed.
   </footer>
 </div>
+
+<script>
+  const LS_HOST = "reachy_dance_party.robot_host";
+  const hostInput = document.getElementById("robot-host");
+  const keyInput = document.getElementById("api-key");
+  const output = document.getElementById("output");
+  const cmd1 = document.getElementById("cmd-1");
+  const cmd2 = document.getElementById("cmd-2");
+
+  const savedHost = localStorage.getItem(LS_HOST);
+  if (savedHost) hostInput.value = savedHost;
+
+  function shellSingleQuote(s) {
+    return "'" + String(s).replace(/'/g, "'\\''") + "'";
+  }
+
+  function generate() {
+    const host = hostInput.value.trim();
+    const key = keyInput.value.trim();
+    if (!host) { hostInput.focus(); return; }
+    if (!key) { keyInput.focus(); return; }
+    localStorage.setItem(LS_HOST, host);
+
+    const envLine = "OPENAI_API_KEY=" + key;
+    const remoteShell = "umask 077 && echo " + shellSingleQuote(envLine) + " > ~/.env";
+    cmd1.textContent = "ssh pollen@" + host + " " + shellSingleQuote(remoteShell);
+    cmd2.textContent =
+      "curl -s -X POST http://" + host + ":8000/api/apps/stop-current-app && " +
+      "sleep 3 && " +
+      "curl -s -X POST http://" + host + ":8000/api/apps/start-app/reachy_mini_dance_party_app";
+    output.hidden = false;
+  }
+
+  document.getElementById("gen-btn").addEventListener("click", generate);
+  document.getElementById("clear-btn").addEventListener("click", () => {
+    keyInput.value = "";
+    cmd1.textContent = "";
+    cmd2.textContent = "";
+    output.hidden = true;
+  });
+
+  document.querySelectorAll(".copy-btn").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      const target = document.getElementById(btn.dataset.target);
+      try {
+        await navigator.clipboard.writeText(target.textContent);
+        const prev = btn.textContent;
+        btn.textContent = "Copied!";
+        btn.classList.add("copied");
+        setTimeout(() => {
+          btn.textContent = prev;
+          btn.classList.remove("copied");
+        }, 1500);
+      } catch (_err) {
+        const sel = window.getSelection();
+        const range = document.createRange();
+        range.selectNodeContents(target);
+        sel.removeAllRanges();
+        sel.addRange(range);
+      }
+    });
+  });
+</script>
 </body>
 </html>
