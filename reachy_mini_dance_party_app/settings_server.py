@@ -152,8 +152,12 @@ _HTML_PAGE = """<!DOCTYPE html>
       const d = await r.json();
       setKeyStatus(!!d.openai_key_set);
       $("s-state").textContent = d.dj_state || "—";
-      $("s-song").textContent = d.song_title || "—";
-      $("s-pos").textContent = d.song_position_s != null
+      if (d.dj_state === "fetching" && d.pending_query) {
+        $("s-song").textContent = "fetching: " + d.pending_query;
+      } else {
+        $("s-song").textContent = d.song_title || "—";
+      }
+      $("s-pos").textContent = d.song_position_s != null && d.song_title
         ? Math.round(d.song_position_s) + " / " + Math.round(d.song_duration_s || 0) + "s"
         : "—";
     } catch (_) {}
@@ -241,6 +245,7 @@ def build_app(
         return {
             "openai_key_set": bool(os.environ.get("OPENAI_API_KEY")),
             "dj_state": state,
+            "pending_query": getattr(dj, "pending_query", None) if dj is not None else None,
             "song_title": getattr(song, "title", None),
             "song_duration_s": getattr(song, "duration_s", None),
             "song_position_s": position,
