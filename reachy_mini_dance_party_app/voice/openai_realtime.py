@@ -42,7 +42,7 @@ logger = logging.getLogger(__name__)
 
 # Default OpenAI Realtime endpoint. Model + auth land in connect headers.
 _DEFAULT_REALTIME_URL = "wss://api.openai.com/v1/realtime"
-_DEFAULT_MODEL = "gpt-realtime"
+_DEFAULT_MODEL = "gpt-realtime-2"
 
 
 # ---------------------------------------------------------------------------
