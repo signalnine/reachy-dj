@@ -222,11 +222,53 @@ def _start_song_progress_watcher(
     ``dj.song_ended()``. Without this, the model is guessing — it tends to
     cut songs short when it hears a pause in the audio.
     """
-    state = {"warned_id": None, "ended_id": None}
+    state = {
+        "warned_id": None,
+        "ended_id": None,
+        "fetch_query": None,        # last query the watcher saw mid-fetch
+        "fetch_started_at": None,   # monotonic ts when this fetch began
+        "last_fetch_nudge_at": None,
+    }
+
+    import time as _time
+    FETCH_NUDGE_AFTER_S = 7.0
+    FETCH_NUDGE_INTERVAL_S = 8.0
 
     def _loop() -> None:
         while not stop_event.is_set():
             stop_event.wait(1.0)
+
+            # Fetch-progress nudges: while the DJ is in FETCHING state, inject
+            # periodic "still pulling it down" notices so the model can fill
+            # the silence with brief progress updates instead of going quiet.
+            dj_state_name = getattr(getattr(dj, "state", None), "name", "") or ""
+            pending = getattr(dj, "pending_query", None)
+            now_mono = _time.monotonic()
+            if dj_state_name == "FETCHING" and pending:
+                if state["fetch_query"] != pending:
+                    state["fetch_query"] = pending
+                    state["fetch_started_at"] = now_mono
+                    state["last_fetch_nudge_at"] = None
+                elapsed = now_mono - (state["fetch_started_at"] or now_mono)
+                last_nudge = state["last_fetch_nudge_at"]
+                if elapsed >= FETCH_NUDGE_AFTER_S and (
+                    last_nudge is None or (now_mono - last_nudge) >= FETCH_NUDGE_INTERVAL_S
+                ):
+                    try:
+                        inject(
+                            f"Still fetching '{pending}' ({int(elapsed)}s in). "
+                            "Toss the audience a brief filler line so it's "
+                            "not silent (e.g. 'almost there', 'pulling it down')."
+                        )
+                    except Exception:  # noqa: BLE001
+                        pass
+                    state["last_fetch_nudge_at"] = now_mono
+            else:
+                # Reset fetch tracking when no fetch is active.
+                state["fetch_query"] = None
+                state["fetch_started_at"] = None
+                state["last_fetch_nudge_at"] = None
+
             song = getattr(dj, "current", None)
             if song is None:
                 continue
@@ -243,7 +285,8 @@ def _start_song_progress_watcher(
                 try:
                     inject(
                         f"Track ending in ~{max(0, int(round(remaining)))}s. "
-                        "Pick the next song now (auto-DJ)."
+                        "Pick the next song now (auto-DJ) — call play_song "
+                        "silently, do not announce the transition with voice."
                     )
                 except Exception:  # noqa: BLE001
                     pass
@@ -858,9 +901,19 @@ class ReachyMiniDancePartyApp:
 
         # 10. Audience push timer. Sends summary JSON via the session's
         # system-event injection.
+        # Suppress audience pushes while a song is playing — they distract
+        # the model into commenting mid-song, which the user explicitly
+        # doesn't want. Pushes resume between songs (idle / fetching).
+        def _audience_should_push() -> bool:
+            d = self._dj
+            if d is None:
+                return True
+            return getattr(getattr(d, "state", None), "name", "") != "PLAYING"
+
         audience = AudiencePush(
             get_latest_frame=camera.get_latest_frame,
             push=session.inject_system_event,
+            should_push=_audience_should_push,
         )
         audience.start()
         self._stack.callback(audience.stop)

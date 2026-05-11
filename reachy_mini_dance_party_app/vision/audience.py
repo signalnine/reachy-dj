@@ -144,12 +144,17 @@ class AudiencePush:
         face_detector_factory: Callable[[], Any] | None = None,
         face_landmarker_factory: Callable[[], Any] | None = None,
         poll_period_s: float = POLL_PERIOD_S,
+        should_push: Callable[[], bool] | None = None,
     ) -> None:
         self._get_latest_frame = get_latest_frame
         self._push = push
         self._cadence_s = float(cadence_s)
         self._clock = clock
         self._poll_period_s = float(poll_period_s)
+        # Optional gate: caller can suppress pushes (e.g. while a song is
+        # playing) so the model doesn't get distracting audience notices that
+        # tempt it to talk over the music.
+        self._should_push = should_push or (lambda: True)
 
         self._detector_factory = face_detector_factory or _default_face_detector_factory
         self._landmarker_factory = (
@@ -281,9 +286,14 @@ class AudiencePush:
         )
 
         try:
-            self._push(summary.to_json())
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("AudiencePush push callable raised: %s", exc)
+            should = self._should_push()
+        except Exception:  # noqa: BLE001
+            should = True
+        if should:
+            try:
+                self._push(summary.to_json())
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("AudiencePush push callable raised: %s", exc)
 
         self._last_push_time = now
         self._last_pushed_n_faces = n_faces
